@@ -1,0 +1,68 @@
+-- Первая таблица, первые строки, первые метакоманды psql.
+SELECT current_setting('server_version_num')::int >= 180000 AS pg18_or_newer,
+       current_user, current_database() LIKE 'course%' AS in_course_db;
+ pg18_or_newer | current_user | in_course_db 
+---------------+--------------+--------------
+ t             | postgres     | t
+(1 row)
+
+CREATE TABLE books (
+    id        bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    title     text NOT NULL,
+    author    text NOT NULL,
+    year      int  CHECK (year BETWEEN 1450 AND 2100),
+    price_rub numeric(10, 2) NOT NULL DEFAULT 0
+);
+INSERT INTO books (title, author, year, price_rub) VALUES
+    ('Мастер и Маргарита', 'Михаил Булгаков', 1967, 590),
+    ('Пикник на обочине', 'Аркадий и Борис Стругацкие', 1972, 450),
+    ('Designing Data-Intensive Applications', 'Martin Kleppmann', 2017, 3200);
+SELECT id, title, year FROM books ORDER BY year;
+ id |                 title                 | year 
+----+---------------------------------------+------
+  1 | Мастер и Маргарита                    | 1967
+  2 | Пикник на обочине                     | 1972
+  3 | Designing Data-Intensive Applications | 2017
+(3 rows)
+
+-- \d — описание таблицы: столбцы, типы, ограничения, индексы
+\d books
+                              Table "public.books"
+  Column   |     Type      | Collation | Nullable |           Default            
+-----------+---------------+-----------+----------+------------------------------
+ id        | bigint        |           | not null | generated always as identity
+ title     | text          |           | not null | 
+ author    | text          |           | not null | 
+ year      | integer       |           |          | 
+ price_rub | numeric(10,2) |           | not null | 0
+Indexes:
+    "books_pkey" PRIMARY KEY, btree (id)
+Check constraints:
+    "books_year_check" CHECK (year >= 1450 AND year <= 2100)
+
+-- \x включает расширенный вывод: одна колонка на строку
+\x on
+SELECT * FROM books WHERE id = 1;
+-[ RECORD 1 ]-----------------
+id        | 1
+title     | Мастер и Маргарита
+author    | Михаил Булгаков
+year      | 1967
+price_rub | 590.00
+
+\x off
+-- \dt — список таблиц, \di — индексов
+\dt
+          List of tables
+ Schema | Name  | Type  |  Owner   
+--------+-------+-------+----------
+ public | books | table | postgres
+(1 row)
+
+\di
+                List of indexes
+ Schema |    Name    | Type  |  Owner   | Table 
+--------+------------+-------+----------+-------
+ public | books_pkey | index | postgres | books
+(1 row)
+

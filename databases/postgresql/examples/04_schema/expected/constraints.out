@@ -1,0 +1,141 @@
+-- Ограничения: база сама охраняет инварианты данных.
+CREATE TABLE customers (
+    id    bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    email text NOT NULL UNIQUE,
+    name  text NOT NULL CHECK (name <> '')
+);
+CREATE TABLE orders (
+    id          bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    customer_id bigint NOT NULL REFERENCES customers (id) ON DELETE RESTRICT,
+    status      text NOT NULL DEFAULT 'new'
+                CHECK (status IN ('new', 'paid', 'shipped', 'cancelled')),
+    total       numeric(12, 2) NOT NULL CHECK (total >= 0),
+    paid_at     timestamptz,
+    CONSTRAINT paid_has_time CHECK (status <> 'paid' OR paid_at IS NOT NULL)
+);
+-- Внешний ключ не создаёт индекс автоматически — создаём сами
+CREATE INDEX orders_customer_id_idx ON orders (customer_id);
+CREATE TABLE order_items (
+    order_id bigint NOT NULL REFERENCES orders (id) ON DELETE CASCADE,
+    sku      text   NOT NULL,
+    qty      int    NOT NULL CHECK (qty > 0),
+    PRIMARY KEY (order_id, sku)                -- составной ключ: позиция уникальна в заказе
+);
+INSERT INTO customers (email, name) VALUES ('anya@example.com', 'Аня'), ('borya@example.com', 'Боря');
+INSERT INTO orders (customer_id, total) VALUES (1, 1500), (1, 300);
+INSERT INTO order_items VALUES (1, 'mug', 2), (1, 'tee', 1);
+-- Каждое нарушение — понятная ошибка с именем ограничения
+INSERT INTO customers (email, name) VALUES ('anya@example.com', 'Другая Аня');
+ERROR:  duplicate key value violates unique constraint "customers_email_key"
+DETAIL:  Key (email)=(anya@example.com) already exists.
+INSERT INTO orders (customer_id, total) VALUES (42, 100);
+ERROR:  insert or update on table "orders" violates foreign key constraint "orders_customer_id_fkey"
+DETAIL:  Key (customer_id)=(42) is not present in table "customers".
+INSERT INTO orders (customer_id, total) VALUES (2, -5);
+ERROR:  new row for relation "orders" violates check constraint "orders_total_check"
+DETAIL:  Failing row contains (4, 2, new, -5.00, null).
+UPDATE orders SET status = 'paid' WHERE id = 1;
+ERROR:  new row for relation "orders" violates check constraint "paid_has_time"
+DETAIL:  Failing row contains (1, 1, paid, 1500.00, null).
+INSERT INTO order_items VALUES (1, 'mug', 1);
+ERROR:  duplicate key value violates unique constraint "order_items_pkey"
+DETAIL:  Key (order_id, sku)=(1, mug) already exists.
+DELETE FROM customers WHERE id = 1;
+ERROR:  update or delete on table "customers" violates RESTRICT setting of foreign key constraint "orders_customer_id_fkey" on table "orders"
+DETAIL:  Key (id)=(1) is referenced from table "orders".
+-- ON DELETE CASCADE: удаление заказа удаляет его позиции
+DELETE FROM orders WHERE id = 1;
+SELECT count(*) AS items_left FROM order_items;
+ items_left 
+------------
+          0
+(1 row)
+
+-- UNIQUE и NULL: по умолчанию NULL не равны друг другу
+CREATE TABLE coupons (code text, campaign text, UNIQUE (code));
+INSERT INTO coupons VALUES (NULL, 'a'), (NULL, 'b');      -- оба проходят
+CREATE TABLE coupons2 (code text, UNIQUE NULLS NOT DISTINCT (code));
+INSERT INTO coupons2 VALUES (NULL), (NULL);                -- PostgreSQL 15+: второй NULL — дубликат
+ERROR:  duplicate key value violates unique constraint "coupons2_code_key"
+DETAIL:  Key (code)=(null) already exists.
+-- Частичная уникальность: один активный email, удалённые могут повторяться
+CREATE TABLE accounts (email text NOT NULL, deleted_at timestamptz);
+CREATE UNIQUE INDEX accounts_email_active_uq ON accounts (email) WHERE deleted_at IS NULL;
+INSERT INTO accounts VALUES ('a@x.ru', '2026-01-01'), ('a@x.ru', NULL);
+INSERT INTO accounts VALUES ('a@x.ru', NULL);
+ERROR:  duplicate key value violates unique constraint "accounts_email_active_uq"
+DETAIL:  Key (email)=(a@x.ru) already exists.
+-- EXCLUDE: две брони одной переговорки не могут пересекаться по времени
+CREATE EXTENSION btree_gist;   -- позволяет использовать = для обычных типов в GiST
+CREATE TABLE room_bookings (
+    room   int NOT NULL,
+    during tstzrange NOT NULL,
+    EXCLUDE USING gist (room WITH =, during WITH &&)
+);
+INSERT INTO room_bookings VALUES (1, '[2026-11-06 10:00+00, 2026-11-06 11:00+00)'),
+                                 (1, '[2026-11-06 11:00+00, 2026-11-06 12:00+00)'),  -- стык — можно
+                                 (2, '[2026-11-06 10:30+00, 2026-11-06 11:30+00)');
+INSERT INTO room_bookings VALUES (1, '[2026-11-06 10:30+00, 2026-11-06 11:30+00)');
+ERROR:  conflicting key value violates exclusion constraint "room_bookings_room_during_excl"
+DETAIL:  Key (room, during)=(1, ["2026-11-06 10:30:00+00","2026-11-06 11:30:00+00")) conflicts with existing key (room, during)=(1, ["2026-11-06 10:00:00+00","2026-11-06 11:00:00+00")).
+-- Темпоральные ключи (PostgreSQL 18): уникальность «во времени» и внешние ключи с PERIOD
+CREATE TABLE prices (
+    sku      text NOT NULL,
+    valid    daterange NOT NULL,
+    price    numeric(10, 2) NOT NULL,
+    PRIMARY KEY (sku, valid WITHOUT OVERLAPS)
+);
+INSERT INTO prices VALUES ('mug', '[2026-01-01, 2026-07-01)', 450), ('mug', '[2026-07-01,)', 495);
+INSERT INTO prices VALUES ('mug', '[2026-06-01, 2026-08-01)', 470);
+ERROR:  conflicting key value violates exclusion constraint "prices_pkey"
+DETAIL:  Key (sku, valid)=(mug, [2026-06-01,2026-08-01)) conflicts with existing key (sku, valid)=(mug, [2026-01-01,2026-07-01)).
+CREATE TABLE promo (
+    sku    text NOT NULL,
+    period daterange NOT NULL,
+    FOREIGN KEY (sku, PERIOD period) REFERENCES prices (sku, PERIOD valid)
+);
+INSERT INTO promo VALUES ('mug', '[2026-06-15, 2026-07-15)');   -- покрыто двумя периодами цен — ок
+INSERT INTO promo VALUES ('mug', '[2025-12-01, 2026-01-15)');   -- декабря 2025 в ценах нет
+ERROR:  insert or update on table "promo" violates foreign key constraint "promo_sku_period_fkey"
+DETAIL:  Key (sku, period)=(mug, [2025-12-01,2026-01-15)) is not present in table "prices".
+-- Отложенная проверка: ограничение проверяется в момент COMMIT
+CREATE TABLE seats (id int PRIMARY KEY, pos int NOT NULL,
+                    CONSTRAINT seats_pos_uq UNIQUE (pos) DEFERRABLE INITIALLY IMMEDIATE);
+INSERT INTO seats VALUES (1, 1), (2, 2);
+BEGIN;
+SET CONSTRAINTS seats_pos_uq DEFERRED;
+UPDATE seats SET pos = 2 WHERE id = 1;   -- временно дубликат — проверка отложена
+UPDATE seats SET pos = 1 WHERE id = 2;
+COMMIT;
+SELECT * FROM seats ORDER BY id;
+ id | pos 
+----+-----
+  1 |   2
+  2 |   1
+(2 rows)
+
+-- NOT VALID: новое ограничение на большой таблице без долгой проверки старых строк
+ALTER TABLE orders ADD CONSTRAINT total_limit CHECK (total < 1000000) NOT VALID;
+ALTER TABLE orders VALIDATE CONSTRAINT total_limit;   -- проверка без блокировки записи
+\d orders
+                                    Table "public.orders"
+   Column    |           Type           | Collation | Nullable |           Default            
+-------------+--------------------------+-----------+----------+------------------------------
+ id          | bigint                   |           | not null | generated always as identity
+ customer_id | bigint                   |           | not null | 
+ status      | text                     |           | not null | 'new'::text
+ total       | numeric(12,2)            |           | not null | 
+ paid_at     | timestamp with time zone |           |          | 
+Indexes:
+    "orders_pkey" PRIMARY KEY, btree (id)
+    "orders_customer_id_idx" btree (customer_id)
+Check constraints:
+    "orders_status_check" CHECK (status = ANY (ARRAY['new'::text, 'paid'::text, 'shipped'::text, 'cancelled'::text]))
+    "orders_total_check" CHECK (total >= 0::numeric)
+    "paid_has_time" CHECK (status <> 'paid'::text OR paid_at IS NOT NULL)
+    "total_limit" CHECK (total < 1000000::numeric)
+Foreign-key constraints:
+    "orders_customer_id_fkey" FOREIGN KEY (customer_id) REFERENCES customers(id) ON DELETE RESTRICT
+Referenced by:
+    TABLE "order_items" CONSTRAINT "order_items_order_id_fkey" FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE CASCADE
+

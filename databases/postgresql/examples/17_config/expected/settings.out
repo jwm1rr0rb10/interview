@@ -1,0 +1,61 @@
+-- Откуда берётся значение параметра и когда изменение вступает в силу.
+-- boot_val — значение, вшитое в сервер; фактическое значение показывает SHOW или setting.
+SELECT name, context, unit, boot_val
+FROM pg_settings
+WHERE name IN ('shared_buffers', 'work_mem', 'maintenance_work_mem', 'effective_cache_size',
+               'max_connections', 'random_page_cost', 'effective_io_concurrency', 'io_method', 'io_workers',
+               'max_wal_size', 'checkpoint_timeout', 'wal_level', 'synchronous_commit', 'jit')
+ORDER BY context, name;
+           name           |  context   | unit | boot_val 
+--------------------------+------------+------+----------
+ io_method                | postmaster |      | worker
+ max_connections          | postmaster |      | 100
+ shared_buffers           | postmaster | 8kB  | 16384
+ wal_level                | postmaster |      | replica
+ checkpoint_timeout       | sighup     | s    | 300
+ io_workers               | sighup     |      | 3
+ max_wal_size             | sighup     | MB   | 1024
+ effective_cache_size     | user       | 8kB  | 524288
+ effective_io_concurrency | user       |      | 16
+ jit                      | user       |      | on
+ maintenance_work_mem     | user       | kB   | 65536
+ random_page_cost         | user       |      | 4
+ synchronous_commit       | user       |      | on
+ work_mem                 | user       | kB   | 4096
+(14 rows)
+
+-- Иерархия: значение по умолчанию → postgresql.conf → ALTER SYSTEM → база → роль → сессия → транзакция
+SELECT format('ALTER DATABASE %I SET work_mem = %L', current_database(), '32MB') \gexec
+ALTER DATABASE course_17_config_settings SET work_mem = '32MB'
+\c
+SELECT current_setting('work_mem') AS work_mem, source FROM pg_settings WHERE name = 'work_mem';
+ work_mem |  source  
+----------+----------
+ 32MB     | database
+(1 row)
+
+SET work_mem = '64MB';
+SELECT current_setting('work_mem') AS work_mem, source FROM pg_settings WHERE name = 'work_mem';
+ work_mem | source  
+----------+---------
+ 64MB     | session
+(1 row)
+
+BEGIN;
+SET LOCAL work_mem = '256MB';          -- только до конца транзакции: удобно для тяжёлого отчёта
+SELECT current_setting('work_mem') AS in_transaction;
+ in_transaction 
+----------------
+ 256MB
+(1 row)
+
+COMMIT;
+SELECT current_setting('work_mem') AS after_commit;
+ after_commit 
+--------------
+ 64MB
+(1 row)
+
+-- Параметр уровня postmaster нельзя поменять в сессии
+SET shared_buffers = '1GB';
+ERROR:  parameter "shared_buffers" cannot be changed without restarting the server

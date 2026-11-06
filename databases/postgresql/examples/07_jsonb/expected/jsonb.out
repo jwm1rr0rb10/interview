@@ -1,0 +1,154 @@
+-- jsonb: бинарный JSON с индексами и операторами
+SELECT '{"b": 1, "a": 2, "a": 3}'::json  AS json_keeps_text,
+       '{"b": 1, "a": 2, "a": 3}'::jsonb AS jsonb_normalized;
+     json_keeps_text      | jsonb_normalized 
+--------------------------+------------------
+ {"b": 1, "a": 2, "a": 3} | {"a": 3, "b": 1}
+(1 row)
+
+CREATE TABLE events (
+    id      bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    kind    text NOT NULL,
+    payload jsonb NOT NULL
+);
+INSERT INTO events (kind, payload) VALUES
+ ('order', '{"order_id": 1, "total": 1500, "items": [{"sku": "mug", "qty": 2}, {"sku": "tee", "qty": 1}], "customer": {"city": "Москва", "vip": true}}'),
+ ('order', '{"order_id": 2, "total": 300,  "items": [{"sku": "mug", "qty": 1}], "customer": {"city": "Казань"}}'),
+ ('login', '{"user": "anya", "device": {"os": "ios", "version": "18.1"}}');
+-- Доступ к полям: -> возвращает jsonb, ->> — текст, #>> — путь
+SELECT id, payload -> 'customer' AS customer, payload ->> 'total' AS total_text,
+       (payload ->> 'total')::numeric * 1.2 AS total_vat, payload #>> '{customer,city}' AS city
+FROM events WHERE kind = 'order' ORDER BY id;
+ id |            customer             | total_text | total_vat |  city  
+----+---------------------------------+------------+-----------+--------
+  1 | {"vip": true, "city": "Москва"} | 1500       |    1800.0 | Москва
+  2 | {"city": "Казань"}              | 300        |     360.0 | Казань
+(2 rows)
+
+-- Синтаксис индексов (PostgreSQL 14+)
+SELECT payload['customer']['city'] AS city FROM events WHERE id = 1;
+   city   
+----------
+ "Москва"
+(1 row)
+
+-- Содержит (@>) и существование ключа (?)
+SELECT id FROM events WHERE payload @> '{"customer": {"vip": true}}';
+ id 
+----
+  1
+(1 row)
+
+SELECT id FROM events WHERE payload ? 'device';
+ id 
+----
+  3
+(1 row)
+
+-- Изменение: jsonb_set, конкатенация ||, удаление ключа -
+UPDATE events SET payload = jsonb_set(payload, '{customer,vip}', 'false') WHERE id = 2;
+UPDATE events SET payload = (payload || '{"source": "app"}') - 'device' WHERE id = 3;
+SELECT id, payload FROM events WHERE id IN (2, 3) ORDER BY id;
+ id |                                                     payload                                                      
+----+------------------------------------------------------------------------------------------------------------------
+  2 | {"items": [{"qty": 1, "sku": "mug"}], "total": 300, "customer": {"vip": false, "city": "Казань"}, "order_id": 2}
+  3 | {"user": "anya", "source": "app"}
+(2 rows)
+
+-- Развернуть массив в строки
+SELECT e.id, item ->> 'sku' AS sku, (item ->> 'qty')::int AS qty
+FROM events e, jsonb_array_elements(e.payload -> 'items') AS item
+ORDER BY e.id, sku;
+ id | sku | qty 
+----+-----+-----
+  1 | mug |   2
+  1 | tee |   1
+  2 | mug |   1
+(3 rows)
+
+-- SQL/JSON path: фильтры внутри документа
+SELECT id, jsonb_path_query_array(payload, '$.items[*] ? (@.qty >= 2).sku') AS bulk_skus
+FROM events WHERE kind = 'order' ORDER BY id;
+ id | bulk_skus 
+----+-----------
+  1 | ["mug"]
+  2 | []
+(2 rows)
+
+SELECT id FROM events WHERE payload @? '$.items[*] ? (@.sku == "tee")';
+ id 
+----
+  1
+(1 row)
+
+-- Стандартные функции SQL/JSON (PostgreSQL 17)
+SELECT JSON_VALUE(payload, '$.customer.city') AS city,
+       JSON_QUERY(payload, '$.items[0]') AS first_item,
+       JSON_EXISTS(payload, '$.customer.vip') AS has_vip
+FROM events WHERE id = 1;
+  city  |        first_item        | has_vip 
+--------+--------------------------+---------
+ Москва | {"qty": 2, "sku": "mug"} | t
+(1 row)
+
+-- JSON_TABLE (PostgreSQL 17): JSON в обычную таблицу
+SELECT jt.*
+FROM events e,
+     JSON_TABLE(e.payload, '$' COLUMNS (
+         order_id int PATH '$.order_id',
+         city text PATH '$.customer.city',
+         NESTED PATH '$.items[*]' COLUMNS (sku text PATH '$.sku', qty int PATH '$.qty')
+     )) AS jt
+WHERE e.kind = 'order'
+ORDER BY order_id, sku;
+ order_id |  city  | sku | qty 
+----------+--------+-----+-----
+        1 | Москва | mug |   2
+        1 | Москва | tee |   1
+        2 | Казань | mug |   1
+(3 rows)
+
+-- Сборка JSON из строк — ответ API прямо из базы
+SELECT jsonb_build_object('kind', kind, 'count', count(*), 'ids', jsonb_agg(id ORDER BY id)) AS summary
+FROM events GROUP BY kind ORDER BY kind;
+                   summary                    
+----------------------------------------------
+ {"ids": [3], "kind": "login", "count": 1}
+ {"ids": [1, 2], "kind": "order", "count": 2}
+(2 rows)
+
+-- Индексы: GIN для @> и ?, B-tree по выражению для одного поля
+INSERT INTO events (kind, payload)
+SELECT 'order', jsonb_build_object('order_id', i, 'total', i % 5000,
+       'customer', jsonb_build_object('city', (ARRAY['Москва','Казань','Пермь','Сочи'])[i % 4 + 1], 'vip', i % 100 = 0))
+FROM generate_series(3, 50000) i;
+CREATE INDEX events_payload_gin ON events USING gin (payload jsonb_path_ops);
+CREATE INDEX events_total_idx ON events (((payload ->> 'total')::int));
+ANALYZE events;
+EXPLAIN (COSTS OFF) SELECT count(*) FROM events WHERE payload @> '{"customer": {"vip": true}}';
+                                 QUERY PLAN                                  
+-----------------------------------------------------------------------------
+ Aggregate
+   ->  Bitmap Heap Scan on events
+         Recheck Cond: (payload @> '{"customer": {"vip": true}}'::jsonb)
+         ->  Bitmap Index Scan on events_payload_gin
+               Index Cond: (payload @> '{"customer": {"vip": true}}'::jsonb)
+(5 rows)
+
+EXPLAIN (COSTS OFF) SELECT id FROM events WHERE (payload ->> 'total')::int = 4999;
+                             QUERY PLAN                              
+---------------------------------------------------------------------
+ Bitmap Heap Scan on events
+   Recheck Cond: (((payload ->> 'total'::text))::integer = 4999)
+   ->  Bitmap Index Scan on events_total_idx
+         Index Cond: (((payload ->> 'total'::text))::integer = 4999)
+(4 rows)
+
+-- Тот же смысл, но выражение не совпадает с индексом — индекс не используется
+EXPLAIN (COSTS OFF) SELECT id FROM events WHERE payload ->> 'total' = '4999';
+                       QUERY PLAN                       
+--------------------------------------------------------
+ Seq Scan on events
+   Filter: ((payload ->> 'total'::text) = '4999'::text)
+(2 rows)
+

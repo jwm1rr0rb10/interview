@@ -1,0 +1,20 @@
+# golangci-lint v2: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest
+version: "2"
+
+linters:
+  default: standard        # govet, errcheck, staticcheck, unused, ineffassign
+  enable:
+    - bodyclose            # незакрытый resp.Body
+    - contextcheck         # потерянный контекст в цепочке вызовов
+    - errorlint            # сравнение ошибок через == вместо errors.Is
+    - gosec                # проблемы безопасности: таймауты сервера, слабая криптография
+    - nilerr               # возврат nil вместо ошибки
+    - noctx                # HTTP-запросы и SQL без контекста
+    - revive               # стиль и имена
+    - sqlclosecheck        # незакрытые sql.Rows
+    - unconvert            # лишние преобразования типов
+
+formatters:
+  enable:
+    - gofmt
+    - goimports

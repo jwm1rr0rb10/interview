@@ -1,0 +1,86 @@
+-- NULL — «неизвестно»: трёхзначная логика и её ловушки.
+SELECT NULL = NULL AS eq, NULL <> 1 AS ne, NULL IS NULL AS is_null,
+       NULL IS DISTINCT FROM NULL AS distinct_nulls,
+       1 IS DISTINCT FROM NULL AS distinct_1_null;
+ eq | ne | is_null | distinct_nulls | distinct_1_null 
+----+----+---------+----------------+-----------------
+    |    | t       | f              | t
+(1 row)
+
+SELECT true AND NULL AS and_t, false AND NULL AS and_f,
+       true OR NULL AS or_t, NOT NULL::boolean AS not_null;
+ and_t | and_f | or_t | not_null 
+-------+-------+------+----------
+       | f     | t    | 
+(1 row)
+
+CREATE TABLE employees (name text, manager text, bonus int);
+INSERT INTO employees VALUES ('Аня', NULL, 100), ('Боря', 'Аня', NULL), ('Вика', 'Аня', 50);
+-- WHERE отбрасывает строки, где условие NULL: Аня не попадёт ни в одну выборку
+SELECT name FROM employees WHERE manager = 'Аня';
+ name 
+------
+ Боря
+ Вика
+(2 rows)
+
+SELECT name FROM employees WHERE manager <> 'Аня';
+ name 
+------
+(0 rows)
+
+SELECT name FROM employees WHERE manager IS DISTINCT FROM 'Аня';
+ name 
+------
+ Аня
+(1 row)
+
+-- Агрегаты пропускают NULL; count(*) считает строки, count(col) — непустые значения
+SELECT count(*) AS rows, count(bonus) AS with_bonus, sum(bonus), avg(bonus) FROM employees;
+ rows | with_bonus | sum |         avg         
+------+------------+-----+---------------------
+    3 |          2 | 150 | 75.0000000000000000
+(1 row)
+
+-- COALESCE — первое не-NULL значение; NULLIF — защита от деления на ноль
+SELECT name, coalesce(bonus, 0) AS bonus, 100 / nullif(coalesce(bonus, 0), 0) AS ratio
+FROM employees ORDER BY name;
+ name | bonus | ratio 
+------+-------+-------
+ Аня  |   100 |     1
+ Боря |     0 |      
+ Вика |    50 |     2
+(3 rows)
+
+-- Главная ловушка: NOT IN с NULL в подзапросе не возвращает ничего
+SELECT name FROM employees WHERE name NOT IN (SELECT manager FROM employees);
+ name 
+------
+(0 rows)
+
+-- NOT EXISTS работает как ожидается
+SELECT e.name FROM employees e
+WHERE NOT EXISTS (SELECT 1 FROM employees s WHERE s.manager = e.name);
+ name 
+------
+ Боря
+ Вика
+(2 rows)
+
+-- Сортировка: NULL по умолчанию последние при ASC, первые при DESC
+SELECT name, bonus FROM employees ORDER BY bonus DESC;
+ name | bonus 
+------+-------
+ Боря |      
+ Аня  |   100
+ Вика |    50
+(3 rows)
+
+SELECT name, bonus FROM employees ORDER BY bonus DESC NULLS LAST;
+ name | bonus 
+------+-------
+ Аня  |   100
+ Вика |    50
+ Боря |      
+(3 rows)
+

@@ -1,0 +1,122 @@
+SET max_parallel_workers_per_gather = 0;
+-- Таблица событий, разбитая по месяцам
+CREATE TABLE events (
+    id         bigint GENERATED ALWAYS AS IDENTITY,
+    created_at timestamptz NOT NULL,
+    kind       text NOT NULL,
+    PRIMARY KEY (id, created_at)          -- ключ партиционирования обязан входить в PK и UNIQUE
+) PARTITION BY RANGE (created_at);
+CREATE TABLE events_2026_09 PARTITION OF events FOR VALUES FROM ('2026-09-01') TO ('2026-10-01');
+CREATE TABLE events_2026_10 PARTITION OF events FOR VALUES FROM ('2026-10-01') TO ('2026-11-01');
+CREATE TABLE events_2026_11 PARTITION OF events FOR VALUES FROM ('2026-11-01') TO ('2026-12-01');
+CREATE TABLE events_default PARTITION OF events DEFAULT;
+-- Индекс на родителе автоматически создаётся на каждой секции
+CREATE INDEX events_kind_created_idx ON events (kind, created_at);
+INSERT INTO events (created_at, kind)
+SELECT '2026-09-01'::timestamptz + (i || ' minutes')::interval,
+       (ARRAY['click', 'view', 'buy'])[i % 3 + 1]
+FROM generate_series(0, 125000) i;
+ANALYZE events;
+SELECT tableoid::regclass AS partition, count(*), min(created_at)::date, max(created_at)::date
+FROM events GROUP BY 1 ORDER BY 1;
+   partition    | count |    min     |    max     
+----------------+-------+------------+------------
+ events_2026_09 | 43200 | 2026-09-01 | 2026-09-30
+ events_2026_10 | 44640 | 2026-10-01 | 2026-10-31
+ events_2026_11 | 37161 | 2026-11-01 | 2026-11-26
+(3 rows)
+
+-- Отсечение секций (partition pruning): читается только октябрь
+EXPLAIN (COSTS OFF)
+SELECT count(*) FROM events WHERE created_at >= '2026-10-10' AND created_at < '2026-10-11';
+                                                                              QUERY PLAN                                                                              
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Aggregate
+   ->  Bitmap Heap Scan on events_2026_10 events
+         Recheck Cond: ((created_at >= '2026-10-10 00:00:00+00'::timestamp with time zone) AND (created_at < '2026-10-11 00:00:00+00'::timestamp with time zone))
+         ->  Bitmap Index Scan on events_2026_10_kind_created_at_idx
+               Index Cond: ((created_at >= '2026-10-10 00:00:00+00'::timestamp with time zone) AND (created_at < '2026-10-11 00:00:00+00'::timestamp with time zone))
+(5 rows)
+
+-- Без условия на ключ партиционирования читаются все секции
+EXPLAIN (COSTS OFF) SELECT count(*) FROM events WHERE kind = 'buy';
+                                QUERY PLAN                                 
+---------------------------------------------------------------------------
+ Aggregate
+   ->  Append
+         ->  Bitmap Heap Scan on events_2026_09 events_1
+               Recheck Cond: (kind = 'buy'::text)
+               ->  Bitmap Index Scan on events_2026_09_kind_created_at_idx
+                     Index Cond: (kind = 'buy'::text)
+         ->  Bitmap Heap Scan on events_2026_10 events_2
+               Recheck Cond: (kind = 'buy'::text)
+               ->  Bitmap Index Scan on events_2026_10_kind_created_at_idx
+                     Index Cond: (kind = 'buy'::text)
+         ->  Bitmap Heap Scan on events_2026_11 events_3
+               Recheck Cond: (kind = 'buy'::text)
+               ->  Bitmap Index Scan on events_2026_11_kind_created_at_idx
+                     Index Cond: (kind = 'buy'::text)
+         ->  Seq Scan on events_default events_4
+               Filter: (kind = 'buy'::text)
+(16 rows)
+
+-- Отсечение во время выполнения: значение параметра неизвестно при планировании
+PREPARE by_day(timestamptz) AS SELECT count(*) FROM events WHERE created_at >= $1 AND created_at < $1 + interval '1 day';
+SET plan_cache_mode = force_generic_plan;
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE by_day('2026-11-05');
+                                               QUERY PLAN                                                
+---------------------------------------------------------------------------------------------------------
+ Aggregate (actual rows=1.00 loops=1)
+   ->  Append (actual rows=1440.00 loops=1)
+         Subplans Removed: 3
+         ->  Bitmap Heap Scan on events_2026_11 events_1 (actual rows=1440.00 loops=1)
+               Recheck Cond: ((created_at >= $1) AND (created_at < ($1 + '1 day'::interval)))
+               Heap Blocks: exact=10
+               ->  Bitmap Index Scan on events_2026_11_kind_created_at_idx (actual rows=1440.00 loops=1)
+                     Index Cond: ((created_at >= $1) AND (created_at < ($1 + '1 day'::interval)))
+                     Index Searches: 7
+(9 rows)
+
+RESET plan_cache_mode;
+-- Уникальность без ключа партиционирования невозможна
+ALTER TABLE events ADD CONSTRAINT events_id_uq UNIQUE (id);
+ERROR:  unique constraint on partitioned table must include all partitioning columns
+DETAIL:  UNIQUE constraint on table "events" lacks column "created_at" which is part of the partition key.
+-- Строка вне всех диапазонов попала в DEFAULT; теперь секция на этот месяц не создаётся
+INSERT INTO events (created_at, kind) VALUES ('2026-12-15', 'view');
+CREATE TABLE events_2026_12 PARTITION OF events FOR VALUES FROM ('2026-12-01') TO ('2027-01-01');
+ERROR:  updated partition constraint for default partition "events_default" would be violated by some row
+-- Хранение данных за N месяцев: удаление месяца — отсоединить и удалить секцию, а не DELETE
+ALTER TABLE events DETACH PARTITION events_2026_09;   -- на проде: DETACH ... CONCURRENTLY
+DROP TABLE events_2026_09;
+SELECT count(*) AS left_rows FROM events;
+ left_rows 
+-----------
+     81802
+(1 row)
+
+-- Список партиций
+SELECT relid::text AS partition, isleaf, level FROM pg_partition_tree('events') ORDER BY 1;
+   partition    | isleaf | level 
+----------------+--------+-------
+ events         | f      |     0
+ events_2026_10 | t      |     1
+ events_2026_11 | t      |     1
+ events_default | t      |     1
+(4 rows)
+
+-- Секционирование по списку и по хешу
+CREATE TABLE customers (id bigint, region text NOT NULL) PARTITION BY LIST (region);
+CREATE TABLE customers_ru PARTITION OF customers FOR VALUES IN ('ru', 'by', 'kz');
+CREATE TABLE customers_eu PARTITION OF customers FOR VALUES IN ('de', 'fr');
+CREATE TABLE sessions (id bigint, user_id bigint) PARTITION BY HASH (user_id);
+CREATE TABLE sessions_p0 PARTITION OF sessions FOR VALUES WITH (MODULUS 2, REMAINDER 0);
+CREATE TABLE sessions_p1 PARTITION OF sessions FOR VALUES WITH (MODULUS 2, REMAINDER 1);
+INSERT INTO sessions SELECT i, i FROM generate_series(1, 1000) i;
+SELECT tableoid::regclass, count(*) FROM sessions GROUP BY 1 ORDER BY 1;
+  tableoid   | count 
+-------------+-------
+ sessions_p0 |   535
+ sessions_p1 |   465
+(2 rows)
+
