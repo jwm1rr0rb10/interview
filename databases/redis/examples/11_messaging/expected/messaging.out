@@ -1,0 +1,92 @@
+# ===== Pub/Sub: доставка всем подписчикам прямо сейчас =====
+redis[B]> SUBSCRIBE news
+1) "subscribe"
+2) "news"
+3) (integer) 1
+redis[C]> PSUBSCRIBE news.*
+1) "psubscribe"
+2) "news.*"
+3) (integer) 1
+redis> PUBLISH news "release 8.10 is out"
+(integer) 1
+(ответ клиенту B)
+1) "message"
+2) "news"
+3) "release 8.10 is out"
+redis> PUBLISH news.sport "match tonight"
+(integer) 1
+(ответ клиенту C)
+1) "pmessage"
+2) "news.*"
+3) "news.sport"
+4) "match tonight"
+# Сообщение без подписчиков просто пропадает
+redis> PUBLISH nobody-listens "lost"
+(integer) 0
+redis> PUBSUB CHANNELS
+1) "news"
+redis> PUBSUB NUMSUB news nobody-listens
+1) "news"
+2) (integer) 1
+3) "nobody-listens"
+4) (integer) 0
+redis> PUBSUB NUMPAT
+(integer) 1
+
+# Sharded Pub/Sub (Redis 7.0): канал привязан к слоту, в кластере не рассылается на все узлы
+redis[D]> SSUBSCRIBE orders:events
+1) "ssubscribe"
+2) "orders:events"
+3) (integer) 1
+redis> SPUBLISH orders:events "order 1001 paid"
+(integer) 1
+(ответ клиенту D)
+1) "smessage"
+2) "orders:events"
+3) "order 1001 paid"
+
+# ===== Уведомления о событиях ключей =====
+redis> CONFIG SET notify-keyspace-events KEA
+OK
+redis[E]> PSUBSCRIBE __keyevent@0__:expired __keyevent@0__:del
+1) "psubscribe"
+2) "__keyevent@0__:expired"
+3) (integer) 1
+(ответ клиенту E)
+1) "psubscribe"
+2) "__keyevent@0__:del"
+3) (integer) 2
+redis> SET temp:token abc PX 100
+OK
+# (пауза 0.5 с)
+(ответ клиенту E)
+1) "pmessage"
+2) "__keyevent@0__:expired"
+3) "__keyevent@0__:expired"
+4) "temp:token"
+redis> SET doomed 1
+OK
+redis> DEL doomed
+(integer) 1
+(ответ клиенту E)
+1) "pmessage"
+2) "__keyevent@0__:del"
+3) "__keyevent@0__:del"
+4) "doomed"
+
+# ===== Очередь на списке с блокирующим чтением =====
+redis[F]> BLMOVE jobs jobs:processing LEFT RIGHT 5
+(клиент F ждёт ответа)
+redis> RPUSH jobs job-42
+(integer) 1
+(ответ клиенту F)
+"job-42"
+redis> LRANGE jobs:processing 0 -1
+1) "job-42"
+# после обработки воркер удаляет задачу из «в работе»
+redis> LREM jobs:processing 1 job-42
+(integer) 1
+
+# Блокирующее чтение с тайм-аутом возвращает (nil), если задач нет
+redis> BLPOP empty-queue 0.1
+(nil)

@@ -1,0 +1,125 @@
+# Таблица лидеров: член + число (score), упорядочено по score
+redis> ZADD leaderboard 1500 anya 1200 borya 1800 vika 900 gosha
+(integer) 4
+redis> ZADD leaderboard INCR 400 borya
+"1600"
+redis> ZRANGE leaderboard 0 -1 WITHSCORES
+1) "gosha"
+2) "900"
+3) "anya"
+4) "1500"
+5) "borya"
+6) "1600"
+7) "vika"
+8) "1800"
+redis> ZRANGE leaderboard 0 2 REV WITHSCORES
+1) "vika"
+2) "1800"
+3) "borya"
+4) "1600"
+5) "anya"
+6) "1500"
+redis> ZREVRANK leaderboard anya
+(integer) 2
+redis> ZRANK leaderboard anya WITHSCORE
+1) (integer) 1
+2) "1500"
+redis> ZSCORE leaderboard vika
+"1800"
+redis> ZMSCORE leaderboard anya nobody
+1) "1500"
+2) (nil)
+redis> ZCARD leaderboard
+(integer) 4
+redis> ZCOUNT leaderboard 1000 1700
+(integer) 2
+
+# Диапазоны по score с пагинацией
+redis> ZRANGE leaderboard 1000 +inf BYSCORE LIMIT 0 2 WITHSCORES
+1) "anya"
+2) "1500"
+3) "borya"
+4) "1600"
+redis> ZRANGE leaderboard (1600 -inf BYSCORE REV WITHSCORES
+1) "anya"
+2) "1500"
+3) "gosha"
+4) "900"
+
+# Условные обновления: только если больше (лучший результат игрока)
+redis> ZADD leaderboard GT 1000 vika
+(integer) 0
+redis> ZADD leaderboard GT CH 2000 vika
+(integer) 1
+redis> ZSCORE leaderboard vika
+"2000"
+
+# Извлечь минимум или максимум — приоритетная очередь
+redis> ZADD tasks 3 low 1 urgent 2 normal
+(integer) 3
+redis> ZPOPMIN tasks
+1) "urgent"
+2) "1"
+redis> ZPOPMAX tasks
+1) "low"
+2) "3"
+redis> ZRANGE tasks 0 -1
+1) "normal"
+
+# Индекс по времени: score = unix-время, удаление старого одной командой
+redis> ZADD events 1762400000 e1 1762400060 e2 1762400120 e3 1762400180 e4
+(integer) 4
+redis> ZRANGE events 1762400050 1762400150 BYSCORE
+1) "e2"
+2) "e3"
+redis> ZREMRANGEBYSCORE events -inf 1762400060
+(integer) 2
+redis> ZRANGE events 0 -1
+1) "e3"
+2) "e4"
+
+# Лексикографические диапазоны при одинаковом score — автодополнение
+redis> ZADD words 0 redis 0 redact 0 red 0 reduce 0 ruby 0 rust
+(integer) 6
+redis> ZRANGE words [red (ree BYLEX
+1) "red"
+2) "redact"
+3) "redis"
+4) "reduce"
+redis> ZRANGE words [ru (rv BYLEX
+1) "ruby"
+2) "rust"
+
+# Объединение и пересечение с весами и агрегатами
+redis> ZADD week:1 10 anya 5 borya
+(integer) 2
+redis> ZADD week:2 7 anya 9 vika
+(integer) 2
+redis> ZUNION 2 week:1 week:2 WITHSCORES
+1) "borya"
+2) "5"
+3) "vika"
+4) "9"
+5) "anya"
+6) "17"
+redis> ZUNION 2 week:1 week:2 AGGREGATE MAX WITHSCORES
+1) "borya"
+2) "5"
+3) "vika"
+4) "9"
+5) "anya"
+6) "10"
+redis> ZINTER 2 week:1 week:2 WEIGHTS 1 2 WITHSCORES
+1) "anya"
+2) "24"
+# Агрегат COUNT (Redis 8.8): в скольких множествах встречается член
+redis> ZUNION 2 week:1 week:2 AGGREGATE COUNT WITHSCORES
+1) "borya"
+2) "1"
+3) "vika"
+4) "1"
+5) "anya"
+6) "2"
+
+redis> OBJECT ENCODING leaderboard
+"listpack"

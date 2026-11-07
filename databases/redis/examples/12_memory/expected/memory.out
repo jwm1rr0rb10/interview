@@ -1,0 +1,88 @@
+# ===== Кодировки и память =====
+redis> HSET small f1 v1 f2 v2
+(integer) 2
+redis> OBJECT ENCODING small
+"listpack"
+redis> EVAL "return redis.call('MEMORY', 'USAGE', KEYS[1]) < 200" 1 small
+(integer) 1
+redis> EVAL "for i=1,1000 do redis.call('HSET', KEYS[1], 'field'..i, 'value'..i) end return redis.call('OBJECT', 'ENCODING', KEYS[1])" 1 large
+"hashtable"
+# Одни и те же 1000 полей: компактно в listpack или в hashtable
+redis> CONFIG SET hash-max-listpack-entries 2000
+OK
+redis> EVAL "for i=1,1000 do redis.call('HSET', KEYS[1], 'field'..i, 'value'..i) end return redis.call('OBJECT', 'ENCODING', KEYS[1])" 1 compact
+"listpack"
+redis> EVAL "return {redis.call('MEMORY', 'USAGE', KEYS[1]) > 2 * redis.call('MEMORY', 'USAGE', KEYS[2]) and 1 or 0}" 2 large compact
+1) (integer) 1
+redis> CONFIG SET hash-max-listpack-entries 512
+OK
+
+# Длинная строка в поле переводит хеш в hashtable сразу
+redis> HSET small description "a value that is definitely longer than sixty four bytes, so the listpack limit is exceeded"
+(integer) 1
+redis> OBJECT ENCODING small
+"hashtable"
+
+# ===== Вытеснение: что происходит при достижении maxmemory =====
+redis> SET a 1
+OK
+redis> SET b 2
+OK
+redis> CONFIG GET maxmemory-policy
+1) "maxmemory-policy"
+2) "noeviction"
+# noeviction (по умолчанию): при нехватке памяти команды записи получают ошибку, чтение работает
+redis> CONFIG SET maxmemory 1
+OK
+redis> SET c 3
+(error) OOM command not allowed when used memory > 'maxmemory'.
+redis> GET a
+"1"
+redis> DBSIZE
+(integer) 5
+# allkeys-lru: Redis удаляет ключи, пытаясь освободить место
+redis> CONFIG SET maxmemory-policy allkeys-lru
+OK
+redis> SET c 3
+(error) OOM command not allowed when used memory > 'maxmemory'.
+redis> DBSIZE
+(integer) 0
+redis> CONFIG SET maxmemory 0
+OK
+redis> CONFIG SET maxmemory-policy noeviction
+OK
+
+# volatile-*: вытесняются только ключи с TTL — постоянные данные в безопасности
+redis> SET permanent yes
+OK
+redis> SET cache:x 1 EX 600
+OK
+redis> CONFIG SET maxmemory-policy volatile-lru
+OK
+redis> CONFIG SET maxmemory 1
+OK
+redis> SET cache:y 2 EX 600
+(error) OOM command not allowed when used memory > 'maxmemory'.
+redis> EXISTS permanent cache:x
+(integer) 1
+redis> CONFIG SET maxmemory 0
+OK
+redis> CONFIG SET maxmemory-policy noeviction
+OK
+
+# Политики вытеснения в Redis 8.6+: добавились LRM — least recently modified
+redis> CONFIG SET maxmemory-policy allkeys-lrm
+OK
+redis> CONFIG GET maxmemory-policy
+1) "maxmemory-policy"
+2) "allkeys-lrm"
+redis> CONFIG SET maxmemory-policy noeviction
+OK
+
+# Безопасное удаление больших ключей — в фоне
+redis> UNLINK large compact
+(integer) 0
+redis> FLUSHALL ASYNC
+OK
+redis> DBSIZE
+(integer) 0

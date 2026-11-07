@@ -1,0 +1,153 @@
+# ===== Списки: очередь, стек, последние N событий =====
+redis> RPUSH queue job-1 job-2 job-3
+(integer) 3
+redis> LPOP queue
+"job-1"
+redis> LRANGE queue 0 -1
+1) "job-2"
+2) "job-3"
+redis> LPUSH recent:user42 view:1 view:2 view:3 view:4 view:5
+(integer) 5
+redis> LTRIM recent:user42 0 2
+OK
+redis> LRANGE recent:user42 0 -1
+1) "view:5"
+2) "view:4"
+3) "view:3"
+redis> LLEN recent:user42
+(integer) 3
+redis> LINDEX recent:user42 0
+"view:5"
+
+# Надёжная очередь: элемент переносится в список «в работе» атомарно
+redis> RPUSH jobs a b c
+(integer) 3
+redis> LMOVE jobs jobs:processing LEFT RIGHT
+"a"
+redis> LRANGE jobs:processing 0 -1
+1) "a"
+redis> LREM jobs:processing 1 a
+(integer) 1
+
+# LMOVEM (Redis 8.10): перенести сразу пачку элементов
+redis> LMOVEM jobs jobs:processing LEFT RIGHT COUNT 5 BULK
+1) "b"
+2) "c"
+redis> LRANGE jobs:processing 0 -1
+1) "b"
+2) "c"
+redis> EXISTS jobs
+(integer) 0
+
+# ===== Хеши: объект с полями =====
+redis> HSET user:42 name anya city kazan visits 0
+(integer) 3
+redis> HGET user:42 city
+"kazan"
+redis> HINCRBY user:42 visits 1
+(integer) 1
+redis> HMGET user:42 name visits missing
+1) "anya"
+2) "1"
+3) (nil)
+redis> HGETALL user:42
+1) "name"
+2) "anya"
+3) "city"
+4) "kazan"
+5) "visits"
+6) "1"
+redis> HEXISTS user:42 email
+(integer) 0
+redis> HSETNX user:42 email anya@example.com
+(integer) 1
+redis> HLEN user:42
+(integer) 4
+redis> HDEL user:42 city
+(integer) 1
+redis> HKEYS user:42
+1) "name"
+2) "visits"
+3) "email"
+redis> OBJECT ENCODING user:42
+"listpack"
+
+# Время жизни отдельных полей (Redis 7.4) и чтение с изменением TTL (Redis 8.0)
+redis> HSET session:s1 user 42 csrf t0k3n
+(integer) 2
+redis> HEXPIRE session:s1 600 FIELDS 1 csrf
+1) (integer) 1
+redis> HTTL session:s1 FIELDS 2 csrf user
+1) (integer) 600
+2) (integer) -1
+redis> HSETEX session:s1 EX 60 FIELDS 1 otp 123456
+(integer) 1
+redis> HTTL session:s1 FIELDS 1 otp
+1) (integer) 60
+redis> HGETDEL session:s1 FIELDS 1 otp
+1) "123456"
+redis> HGETALL session:s1
+1) "csrf"
+2) "t0k3n"
+3) "user"
+4) "42"
+
+# ===== Множества: уникальные значения и операции над ними =====
+redis> SADD tags:post1 redis db cache
+(integer) 3
+redis> SADD tags:post2 redis streams queue
+(integer) 3
+redis> SADD tags:post1 redis
+(integer) 0
+redis> SISMEMBER tags:post1 cache
+(integer) 1
+redis> SMISMEMBER tags:post1 cache queue
+1) (integer) 1
+2) (integer) 0
+redis> SCARD tags:post1
+(integer) 3
+redis> SINTER tags:post1 tags:post2
+1) "redis"
+redis> SUNION tags:post1 tags:post2
+1) "redis"
+2) "streams"
+3) "db"
+4) "cache"
+5) "queue"
+redis> SDIFF tags:post1 tags:post2
+1) "cache"
+2) "db"
+redis> SINTERCARD 2 tags:post1 tags:post2
+(integer) 1
+# Мощности объединения и разности без построения результата (Redis 8.10)
+redis> SUNIONCARD 2 tags:post1 tags:post2
+(integer) 5
+redis> SDIFFCARD 2 tags:post1 tags:post2
+(integer) 2
+redis> SMEMBERS tags:post1
+1) "redis"
+2) "db"
+3) "cache"
+redis> OBJECT ENCODING tags:post1
+"listpack"
+
+# Множество целых чисел хранится особенно компактно
+redis> SADD ids 5 1 3
+(integer) 3
+redis> SMEMBERS ids
+1) "1"
+2) "3"
+3) "5"
+redis> OBJECT ENCODING ids
+"intset"
+
+# ===== Кодировки меняются с ростом =====
+redis> CONFIG GET hash-max-listpack-entries
+1) "hash-max-listpack-entries"
+2) "512"
+redis> HSET big f0 v
+(integer) 1
+redis> EVAL "for i=1,512 do redis.call('HSET', KEYS[1], 'f'..i, 'v') end return redis.call('HLEN', KEYS[1])" 1 big
+(integer) 513
+redis> OBJECT ENCODING big
+"hashtable"

@@ -1,0 +1,143 @@
+# ===== Битовые карты: флаги по номерам, например «пользователь заходил в день N» =====
+redis> SETBIT active:2026-11-06 42 1
+(integer) 0
+redis> SETBIT active:2026-11-06 7 1
+(integer) 0
+redis> SETBIT active:2026-11-07 42 1
+(integer) 0
+redis> GETBIT active:2026-11-06 42
+(integer) 1
+redis> GETBIT active:2026-11-06 8
+(integer) 0
+redis> BITCOUNT active:2026-11-06
+(integer) 2
+# Заходили оба дня: побитовое И
+redis> BITOP AND active:both active:2026-11-06 active:2026-11-07
+(integer) 6
+redis> BITCOUNT active:both
+(integer) 1
+redis> BITPOS active:2026-11-06 1
+(integer) 7
+redis> STRLEN active:2026-11-06
+(integer) 6
+
+# BITFIELD: несколько счётчиков фиксированной ширины в одной строке
+redis> BITFIELD stats SET u8 0 200 INCRBY u8 0 100 GET u8 0
+1) (integer) 0
+2) (integer) 44
+3) (integer) 44
+redis> BITFIELD stats OVERFLOW SAT INCRBY u8 8 300 GET u8 8
+1) (integer) 255
+2) (integer) 255
+
+# ===== HyperLogLog: приблизительное число уникальных за 12 КБ =====
+redis> PFADD visitors:mon u1 u2 u3 u4 u5
+(integer) 1
+redis> PFADD visitors:tue u4 u5 u6
+(integer) 1
+redis> PFADD visitors:mon u1
+(integer) 0
+redis> PFCOUNT visitors:mon
+(integer) 5
+redis> PFCOUNT visitors:mon visitors:tue
+(integer) 6
+redis> PFMERGE visitors:week visitors:mon visitors:tue
+OK
+redis> PFCOUNT visitors:week
+(integer) 6
+redis> EVAL "for i=1,100000 do redis.call('PFADD', KEYS[1], 'user'..i) end return redis.call('PFCOUNT', KEYS[1])" 1 visitors:big
+(integer) 99725
+redis> STRLEN visitors:big
+(integer) 12304
+
+# ===== Геоданные: точки и поиск по радиусу =====
+redis> GEOADD shops 37.6173 55.7558 kremlin 37.5867 55.7339 gorky-park 30.3141 59.9386 hermitage
+(integer) 3
+redis> GEODIST shops kremlin gorky-park km
+"3.0989"
+redis> GEOSEARCH shops FROMLONLAT 37.62 55.75 BYRADIUS 5 km ASC WITHDIST
+1) 1) "kremlin"
+   2) "0.6668"
+2) 1) "gorky-park"
+   2) "2.7486"
+redis> GEOSEARCH shops FROMMEMBER kremlin BYBOX 1000 1000 km ASC
+1) "kremlin"
+2) "gorky-park"
+3) "hermitage"
+redis> GEOPOS shops hermitage
+1) 1) "30.314098298549652"
+   2) "59.93860068195079"
+redis> TYPE shops
+zset
+
+# ===== Array (Redis 8.8): разреженный массив с доступом по индексу =====
+redis> ARSET sensor:1 0 21.5 21.7 22.0
+(integer) 3
+redis> ARSET sensor:1 100 25.1
+(integer) 1
+redis> ARGET sensor:1 1
+"21.7"
+redis> ARLEN sensor:1
+(integer) 101
+redis> ARCOUNT sensor:1
+(integer) 4
+redis> ARGETRANGE sensor:1 0 3
+1) "21.5"
+2) "21.7"
+3) "22.0"
+4) (nil)
+redis> ARSCAN sensor:1 0 1000
+1) 1) (integer) 0
+   2) "21.5"
+2) 1) (integer) 1
+   2) "21.7"
+3) 1) (integer) 2
+   2) "22.0"
+4) 1) (integer) 100
+   2) "25.1"
+redis> AROP sensor:1 0 1000 MAX
+"25.1"
+redis> AROP sensor:1 0 2 SUM
+"65.2"
+# Кольцевой буфер последних N значений
+redis> ARRING last5 3 a b c d e
+(integer) 1
+redis> ARGETRANGE last5 0 2
+1) "d"
+2) "e"
+3) "c"
+redis> ARLASTITEMS last5 2
+1) "d"
+2) "e"
+redis> TYPE sensor:1
+array
+
+# ===== Vector Set (Redis 8.0): векторы и поиск похожих =====
+redis> VADD docs VALUES 3 1.0 0.0 0.0 doc:cats NOQUANT
+(integer) 1
+redis> VADD docs VALUES 3 0.9 0.1 0.0 doc:kittens NOQUANT
+(integer) 1
+redis> VADD docs VALUES 3 0.0 1.0 0.0 doc:cars NOQUANT
+(integer) 1
+redis> VADD docs VALUES 3 0.0 0.9 0.2 doc:trucks NOQUANT
+(integer) 1
+redis> VCARD docs
+(integer) 4
+redis> VDIM docs
+(integer) 3
+redis> VSIM docs VALUES 3 1.0 0.05 0.0 COUNT 2 WITHSCORES
+1) "doc:cats"
+2) "0.9993761777877808"
+3) "doc:kittens"
+4) "0.9990791976451874"
+redis> VSIM docs ELE doc:cars COUNT 2
+1) "doc:cars"
+2) "doc:trucks"
+redis> VSETATTR docs doc:cats "{\"lang\": \"en\", \"year\": 2026}"
+(integer) 1
+redis> VGETATTR docs doc:cats
+"{\"lang\": \"en\", \"year\": 2026}"
+redis> VSIM docs VALUES 3 1.0 0.0 0.0 COUNT 5 FILTER ".year >= 2026"
+1) "doc:cats"
+redis> TYPE docs
+vectorset

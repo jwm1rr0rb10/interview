@@ -1,0 +1,130 @@
+# ===== MULTI/EXEC: команды выполняются подряд, никто не вклинится =====
+redis> SET balance:anya 100
+OK
+redis> SET balance:borya 50
+OK
+redis> MULTI
+OK
+redis> DECRBY balance:anya 30
+QUEUED
+redis> INCRBY balance:borya 30
+QUEUED
+redis> EXEC
+1) (integer) 70
+2) (integer) 80
+redis> MGET balance:anya balance:borya
+1) "70"
+2) "80"
+
+# Отката нет: ошибка выполнения в одной команде не отменяет остальные
+redis> SET name anya
+OK
+redis> MULTI
+OK
+redis> INCR name
+QUEUED
+redis> SET touched yes
+QUEUED
+redis> EXEC
+1) (error) ERR value is not an integer or out of range
+2) OK
+redis> GET touched
+"yes"
+
+# Синтаксическая ошибка при постановке в очередь отменяет всю транзакцию
+redis> MULTI
+OK
+redis> SET a 1
+QUEUED
+redis> SET b
+(error) ERR wrong number of arguments for 'set' command
+redis> EXEC
+(error) EXECABORT Transaction discarded because of previous errors.
+redis> EXISTS a
+(integer) 0
+
+# ===== WATCH: оптимистичная блокировка =====
+redis> SET stock:mug 5
+OK
+redis> WATCH stock:mug
+OK
+redis> GET stock:mug
+"5"
+# ...пока клиент A думает, клиент B покупает последнюю кружку партии
+redis[B]> DECRBY stock:mug 5
+(integer) 0
+redis> MULTI
+OK
+redis> DECRBY stock:mug 1
+QUEUED
+redis> EXEC
+(nil)
+redis> GET stock:mug
+"0"
+# EXEC вернул (nil): транзакция не выполнена, клиент A должен перечитать и повторить
+
+# ===== Lua: логика на сервере, атомарно =====
+# --- скрипт $take_stock (Lua) ---
+-- уменьшить остаток, только если хватает: вернуть новый остаток или -1
+local stock = tonumber(redis.call('GET', KEYS[1]) or '0')
+local want = tonumber(ARGV[1])
+if stock < want then
+  return -1
+end
+return redis.call('DECRBY', KEYS[1], want)
+# --- конец скрипта ---
+redis> SET stock:tee 3
+OK
+redis> EVAL $take_stock 1 stock:tee 2
+(integer) 1
+redis> EVAL $take_stock 1 stock:tee 2
+(integer) -1
+redis> SCRIPT LOAD $take_stock
+"d82c0eef2f3ee5f03b5ed6e9f990d61399447c82"
+redis> EVALSHA d82c0eef2f3ee5f03b5ed6e9f990d61399447c82 1 stock:tee 1
+(integer) 0
+redis> EVAL "return redis.call('GET', KEYS[1])" 1 stock:tee
+"0"
+# Скрипт только на чтение можно выполнять и на репликах
+redis> EVAL_RO "return redis.call('GET', KEYS[1])" 1 stock:tee
+"0"
+redis> EVAL_RO "return redis.call('SET', KEYS[1], 0)" 1 stock:tee
+(error) ERR Write commands are not allowed from read-only scripts. script: 9868df6d4ba6899e63bf18dc63ed9e233ef0f5cf, on @user_script:1.
+
+# ===== Функции (Redis 7.0): именованные, хранятся на сервере, реплицируются =====
+# --- скрипт $shoplib (Lua) ---
+#!lua name=shop
+local function reserve(keys, args)
+  local stock = tonumber(redis.call('GET', keys[1]) or '0')
+  local want = tonumber(args[1])
+  if stock < want then
+    return redis.error_reply('OUT_OF_STOCK осталось ' .. stock)
+  end
+  redis.call('DECRBY', keys[1], want)
+  redis.call('RPUSH', keys[2], args[2])
+  return stock - want
+end
+redis.register_function('reserve', reserve)
+# --- конец скрипта ---
+redis> FUNCTION LOAD $shoplib
+"shop"
+redis> SET stock:cap 2
+OK
+redis> FCALL reserve 2 stock:cap reservations:cap 1 order-1
+(integer) 1
+redis> FCALL reserve 2 stock:cap reservations:cap 5 order-2
+(error) OUT_OF_STOCK осталось 1
+redis> LRANGE reservations:cap 0 -1
+1) "order-1"
+redis> FUNCTION LIST LIBRARYNAME shop
+1) 1) "library_name"
+   2) "shop"
+   3) "engine"
+   4) "LUA"
+   5) "functions"
+   6) 1) 1) "name"
+         2) "reserve"
+         3) "description"
+         4) (nil)
+         5) "flags"
+         6) (empty array)

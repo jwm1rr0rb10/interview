@@ -1,0 +1,39 @@
+# ===== Pub/Sub: доставка всем подписчикам прямо сейчас =====
+[B] SUBSCRIBE news
+[C] PSUBSCRIBE news.*
+PUBLISH news "release 8.10 is out"
+[B?]
+PUBLISH news.sport "match tonight"
+[C?]
+# Сообщение без подписчиков просто пропадает
+PUBLISH nobody-listens "lost"
+PUBSUB CHANNELS
+PUBSUB NUMSUB news nobody-listens
+PUBSUB NUMPAT
+
+# Sharded Pub/Sub (Redis 7.0): канал привязан к слоту, в кластере не рассылается на все узлы
+[D] SSUBSCRIBE orders:events
+SPUBLISH orders:events "order 1001 paid"
+[D?]
+
+# ===== Уведомления о событиях ключей =====
+CONFIG SET notify-keyspace-events KEA
+[E] PSUBSCRIBE __keyevent@0__:expired __keyevent@0__:del
+[E?]
+SET temp:token abc PX 100
+@sleep 0.5
+[E?]
+SET doomed 1
+DEL doomed
+[E?]
+
+# ===== Очередь на списке с блокирующим чтением =====
+[F&] BLMOVE jobs jobs:processing LEFT RIGHT 5
+RPUSH jobs job-42
+[F?]
+LRANGE jobs:processing 0 -1
+# после обработки воркер удаляет задачу из «в работе»
+LREM jobs:processing 1 job-42
+
+# Блокирующее чтение с тайм-аутом возвращает (nil), если задач нет
+BLPOP empty-queue 0.1

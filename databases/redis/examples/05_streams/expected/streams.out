@@ -1,0 +1,187 @@
+# Поток — журнал событий только на дописывание. Обычно ID задаёт сервер (*);
+# здесь ID явные, чтобы вывод был одинаковым при каждом запуске.
+redis> XADD orders 1762400000000-0 order_id 1001 status created
+"1762400000000-0"
+redis> XADD orders 1762400000000-1 order_id 1002 status created
+"1762400000000-1"
+redis> XADD orders 1762400005000-0 order_id 1001 status paid
+"1762400005000-0"
+redis> XLEN orders
+(integer) 3
+redis> XRANGE orders - +
+1) 1) "1762400000000-0"
+   2) 1) "order_id"
+      2) "1001"
+      3) "status"
+      4) "created"
+2) 1) "1762400000000-1"
+   2) 1) "order_id"
+      2) "1002"
+      3) "status"
+      4) "created"
+3) 1) "1762400005000-0"
+   2) 1) "order_id"
+      2) "1001"
+      3) "status"
+      4) "paid"
+redis> XRANGE orders 1762400000000-1 + COUNT 1
+1) 1) "1762400000000-1"
+   2) 1) "order_id"
+      2) "1002"
+      3) "status"
+      4) "created"
+redis> XREVRANGE orders + - COUNT 1
+1) 1) "1762400005000-0"
+   2) 1) "order_id"
+      2) "1001"
+      3) "status"
+      4) "paid"
+
+# ID должны расти
+redis> XADD orders 1762399999999-0 order_id 1 status late
+(error) ERR The ID specified in XADD is equal or smaller than the target stream top item
+
+# Чтение «после такого-то ID» — основа подписки
+redis> XREAD COUNT 10 STREAMS orders 1762400000000-1
+1) 1) "orders"
+   2) 1) 1) "1762400005000-0"
+         2) 1) "order_id"
+            2) "1001"
+            3) "status"
+            4) "paid"
+
+# Группа потребителей: каждое сообщение получит один из потребителей группы
+redis> XGROUP CREATE orders billing 0
+OK
+redis> XREADGROUP GROUP billing worker-1 COUNT 2 STREAMS orders >
+1) 1) "orders"
+   2) 1) 1) "1762400000000-0"
+         2) 1) "order_id"
+            2) "1001"
+            3) "status"
+            4) "created"
+      2) 1) "1762400000000-1"
+         2) 1) "order_id"
+            2) "1002"
+            3) "status"
+            4) "created"
+redis> XREADGROUP GROUP billing worker-2 COUNT 2 STREAMS orders >
+1) 1) "orders"
+   2) 1) 1) "1762400005000-0"
+         2) 1) "order_id"
+            2) "1001"
+            3) "status"
+            4) "paid"
+
+# Пока сообщение не подтверждено, оно в списке ожидающих (PEL)
+redis> XPENDING orders billing
+1) (integer) 3
+2) "1762400000000-0"
+3) "1762400005000-0"
+4) 1) 1) "worker-1"
+      2) "2"
+   2) 1) "worker-2"
+      2) "1"
+redis> XACK orders billing 1762400000000-0
+(integer) 1
+redis> XPENDING orders billing
+1) (integer) 2
+2) "1762400000000-1"
+3) "1762400005000-0"
+4) 1) 1) "worker-1"
+      2) "1"
+   2) 1) "worker-2"
+      2) "1"
+
+# worker-1 упал, не подтвердив сообщение: другой потребитель его забирает
+redis> XAUTOCLAIM orders billing worker-2 0 0-0 COUNT 10
+1) "0-0"
+2) 1) 1) "1762400000000-1"
+      2) 1) "order_id"
+         2) "1002"
+         3) "status"
+         4) "created"
+   2) 1) "1762400005000-0"
+      2) 1) "order_id"
+         2) "1001"
+         3) "status"
+         4) "paid"
+3) (empty array)
+redis> XPENDING orders billing
+1) (integer) 2
+2) "1762400000000-1"
+3) "1762400005000-0"
+4) 1) 1) "worker-2"
+      2) "2"
+
+# XNACK (Redis 8.8): потребитель освобождает сообщение без подтверждения —
+# оно остаётся в PEL группы без владельца и доступно для повторной доставки
+redis> XNACK orders billing SILENT IDS 1 1762400000000-1
+(integer) 1
+redis> XPENDING orders billing
+1) (integer) 2
+2) "1762400000000-1"
+3) "1762400005000-0"
+4) 1) 1) "worker-2"
+      2) "1"
+redis> XAUTOCLAIM orders billing worker-1 0 0-0 COUNT 10
+1) "0-0"
+2) 1) 1) "1762400000000-1"
+      2) 1) "order_id"
+         2) "1002"
+         3) "status"
+         4) "created"
+   2) 1) "1762400005000-0"
+      2) 1) "order_id"
+         2) "1001"
+         3) "status"
+         4) "paid"
+3) (empty array)
+
+# Подтвердить и удалить одной командой (Redis 8.2)
+redis> XACKDEL orders billing IDS 2 1762400000000-1 1762400005000-0
+1) (integer) 1
+2) (integer) 1
+redis> XLEN orders
+(integer) 1
+
+# Ограничение размера: ~ — приблизительная обрезка, дешевле точной
+redis> XADD log MAXLEN 2 1-0 msg a
+"1-0"
+redis> XADD log MAXLEN 2 2-0 msg b
+"2-0"
+redis> XADD log MAXLEN 2 3-0 msg c
+"3-0"
+redis> XRANGE log - +
+1) 1) "2-0"
+   2) 1) "msg"
+      2) "b"
+2) 1) "3-0"
+   2) 1) "msg"
+      2) "c"
+
+# Идемпотентная запись (Redis 8.6): повтор с тем же ключом не создаёт дубликат.
+# IDMP работает только с ID от сервера (*), поэтому ответ печатаем не напрямую:
+# скрипт сравнивает ID двух попыток (1 — совпали) и возвращает длину потока.
+redis> XADD payments IDMP gateway-1 pay-777 * amount 500
+(ответ опущен: зависит от окружения)
+redis> XADD payments IDMP gateway-1 pay-777 * amount 500
+(ответ опущен: зависит от окружения)
+redis> XLEN payments
+(integer) 1
+redis> EVAL "local a = redis.call('XADD', KEYS[1], 'IDMP', 'gw-2', 'pay-1', '*', 'amount', '10') local b = redis.call('XADD', KEYS[1], 'IDMP', 'gw-2', 'pay-1', '*', 'amount', '10') return {a == b and 1 or 0, redis.call('XLEN', KEYS[1])}" 1 payments
+1) (integer) 1
+2) (integer) 2
+
+# Блокирующее чтение: клиент B ждёт новых сообщений
+redis[B]> XREAD BLOCK 5000 STREAMS orders $
+(клиент B ждёт ответа)
+redis> XADD orders 1762400010000-0 order_id 1003 status created
+"1762400010000-0"
+(ответ клиенту B)
+1) 1) "orders"
+   2) 1) 1) "1762400010000-0"
+         2) 1) "order_id"
+            2) "1003"
+            3) "status"
+            4) "created"

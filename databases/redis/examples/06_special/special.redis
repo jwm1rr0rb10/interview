@@ -1,0 +1,65 @@
+# ===== Битовые карты: флаги по номерам, например «пользователь заходил в день N» =====
+SETBIT active:2026-11-06 42 1
+SETBIT active:2026-11-06 7 1
+SETBIT active:2026-11-07 42 1
+GETBIT active:2026-11-06 42
+GETBIT active:2026-11-06 8
+BITCOUNT active:2026-11-06
+# Заходили оба дня: побитовое И
+BITOP AND active:both active:2026-11-06 active:2026-11-07
+BITCOUNT active:both
+BITPOS active:2026-11-06 1
+STRLEN active:2026-11-06
+
+# BITFIELD: несколько счётчиков фиксированной ширины в одной строке
+BITFIELD stats SET u8 0 200 INCRBY u8 0 100 GET u8 0
+BITFIELD stats OVERFLOW SAT INCRBY u8 8 300 GET u8 8
+
+# ===== HyperLogLog: приблизительное число уникальных за 12 КБ =====
+PFADD visitors:mon u1 u2 u3 u4 u5
+PFADD visitors:tue u4 u5 u6
+PFADD visitors:mon u1
+PFCOUNT visitors:mon
+PFCOUNT visitors:mon visitors:tue
+PFMERGE visitors:week visitors:mon visitors:tue
+PFCOUNT visitors:week
+EVAL "for i=1,100000 do redis.call('PFADD', KEYS[1], 'user'..i) end return redis.call('PFCOUNT', KEYS[1])" 1 visitors:big
+STRLEN visitors:big
+
+# ===== Геоданные: точки и поиск по радиусу =====
+GEOADD shops 37.6173 55.7558 kremlin 37.5867 55.7339 gorky-park 30.3141 59.9386 hermitage
+GEODIST shops kremlin gorky-park km
+GEOSEARCH shops FROMLONLAT 37.62 55.75 BYRADIUS 5 km ASC WITHDIST
+GEOSEARCH shops FROMMEMBER kremlin BYBOX 1000 1000 km ASC
+GEOPOS shops hermitage
+TYPE shops
+
+# ===== Array (Redis 8.8): разреженный массив с доступом по индексу =====
+ARSET sensor:1 0 21.5 21.7 22.0
+ARSET sensor:1 100 25.1
+ARGET sensor:1 1
+ARLEN sensor:1
+ARCOUNT sensor:1
+ARGETRANGE sensor:1 0 3
+ARSCAN sensor:1 0 1000
+AROP sensor:1 0 1000 MAX
+AROP sensor:1 0 2 SUM
+# Кольцевой буфер последних N значений
+ARRING last5 3 a b c d e
+ARGETRANGE last5 0 2
+ARLASTITEMS last5 2
+TYPE sensor:1
+
+# ===== Vector Set (Redis 8.0): векторы и поиск похожих =====
+VADD docs VALUES 3 1.0 0.0 0.0 doc:cats NOQUANT
+VADD docs VALUES 3 0.9 0.1 0.0 doc:kittens NOQUANT
+VADD docs VALUES 3 0.0 1.0 0.0 doc:cars NOQUANT
+VADD docs VALUES 3 0.0 0.9 0.2 doc:trucks NOQUANT
+VCARD docs
+VDIM docs
+VSIM docs VALUES 3 1.0 0.05 0.0 COUNT 2 WITHSCORES
+VSIM docs ELE doc:cars COUNT 2
+VSETATTR docs doc:cats "{\"lang\": \"en\", \"year\": 2026}"
+VGETATTR docs doc:cats
+VSIM docs VALUES 3 1.0 0.0 0.0 COUNT 5 FILTER ".year >= 2026"
+TYPE docs

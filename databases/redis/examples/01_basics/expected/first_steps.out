@@ -1,0 +1,61 @@
+# Проверка связи и первые ключи
+redis> PING
+PONG
+redis> SET greeting "Hello, Redis"
+OK
+redis> GET greeting
+"Hello, Redis"
+redis> GET missing
+(nil)
+redis> EXISTS greeting missing
+(integer) 1
+redis> TYPE greeting
+string
+
+# Пространство ключей: двоеточие — соглашение для иерархии имён
+redis> SET user:42:name anya
+OK
+redis> SET user:42:city kazan
+OK
+redis> DBSIZE
+(integer) 3
+redis> DEL user:42:city
+(integer) 1
+redis> DBSIZE
+(integer) 2
+
+# RENAME атомарно переименовывает, COPY — копирует (Redis 6.2+)
+redis> RENAME greeting hello
+OK
+redis> COPY hello hello:backup
+(integer) 1
+redis> GET hello:backup
+"Hello, Redis"
+
+# Время жизни ключа
+redis> SET session:abc token-123 EX 300
+OK
+redis> TTL session:abc
+(integer) 300
+redis> TTL hello
+(integer) -1
+redis> TTL missing
+(integer) -2
+redis> PERSIST session:abc
+(integer) 1
+redis> TTL session:abc
+(integer) -1
+
+# UNLINK удаляет ключ из пространства имён сразу, а память освобождает в фоне
+redis> UNLINK hello hello:backup
+(integer) 2
+
+# Ошибка типа: команда для строк к списку
+redis> RPUSH tasks t1 t2
+(integer) 2
+redis> GET tasks
+(error) WRONGTYPE Operation against a key holding the wrong kind of value
+redis> TYPE tasks
+list
+redis> OBJECT ENCODING tasks
+"listpack"

@@ -1,0 +1,64 @@
+# Cache-aside: приложение сначала смотрит в кэш, при промахе читает базу и кладёт результат
+redis> GET cache:product:1001
+(nil)
+# ...промах: приложение читает товар из базы и сохраняет на 10 минут
+redis> SET cache:product:1001 "{\"id\":1001,\"name\":\"Mug\",\"price\":450}" EX 600
+OK
+redis> GET cache:product:1001
+"{\"id\":1001,\"name\":\"Mug\",\"price\":450}"
+redis> TTL cache:product:1001
+(integer) 600
+
+# Инвалидация при изменении данных: удалить ключ после записи в базу
+redis> DEL cache:product:1001
+(integer) 1
+
+# Отрицательное кэширование: запомнить, что товара нет, на короткое время
+redis> SET cache:product:9999 "__none__" EX 30
+OK
+
+# Защита от «грохочущего стада»: перестраивает кэш только тот, кто получил блокировку
+redis> SET lock:cache:product:1001 worker-a NX PX 5000
+OK
+redis[B]> SET lock:cache:product:1001 worker-b NX PX 5000
+(nil)
+# worker-b не получил блокировку: ждёт немного и читает кэш снова (или отдаёт устаревшее значение)
+redis> SET cache:product:1001 "{\"id\":1001,\"name\":\"Mug\",\"price\":495}" EX 600
+OK
+redis> DELEX lock:cache:product:1001 IFEQ worker-a
+(integer) 1
+redis[B]> GET cache:product:1001
+"{\"id\":1001,\"name\":\"Mug\",\"price\":495}"
+
+# Устаревшее, но быстрое значение: храним «мягкий» срок внутри значения, а «жёсткий» TTL — больше
+redis> HSET cache:profile:42 data "{\"name\":\"anya\"}" soft_expire 1762400600
+(integer) 2
+redis> EXPIRE cache:profile:42 3600
+(integer) 1
+redis> HGET cache:profile:42 soft_expire
+"1762400600"
+
+# Кэш с версией: смена версии делает все старые ключи недоступными без массового удаления
+redis> SET cache:version:catalog 7
+OK
+redis> INCR cache:version:catalog
+(integer) 8
+redis> SET cache:catalog:v8:page:1 "...page 1..." EX 600
+OK
+
+# Клиентское кэширование (RESP3): сервер сообщает клиенту B, что закэшированный ключ изменился
+redis> SET user:42:name anya
+OK
+redis[B]> HELLO 3
+(ответ опущен: зависит от окружения)
+redis[B]> CLIENT TRACKING ON
+OK
+redis[B]> GET user:42:name
+"anya"
+# клиент B сохранил значение у себя в памяти; другой клиент меняет ключ...
+redis> SET user:42:name anna
+OK
+# ...и B получает push-сообщение об инвалидации
+(ответ клиенту B)
+1) "invalidate"
+2) 1) "user:42:name"

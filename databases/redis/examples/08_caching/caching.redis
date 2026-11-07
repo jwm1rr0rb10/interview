@@ -1,0 +1,40 @@
+# Cache-aside: приложение сначала смотрит в кэш, при промахе читает базу и кладёт результат
+GET cache:product:1001
+# ...промах: приложение читает товар из базы и сохраняет на 10 минут
+SET cache:product:1001 "{\"id\":1001,\"name\":\"Mug\",\"price\":450}" EX 600
+GET cache:product:1001
+TTL cache:product:1001
+
+# Инвалидация при изменении данных: удалить ключ после записи в базу
+DEL cache:product:1001
+
+# Отрицательное кэширование: запомнить, что товара нет, на короткое время
+SET cache:product:9999 "__none__" EX 30
+
+# Защита от «грохочущего стада»: перестраивает кэш только тот, кто получил блокировку
+SET lock:cache:product:1001 worker-a NX PX 5000
+[B] SET lock:cache:product:1001 worker-b NX PX 5000
+# worker-b не получил блокировку: ждёт немного и читает кэш снова (или отдаёт устаревшее значение)
+SET cache:product:1001 "{\"id\":1001,\"name\":\"Mug\",\"price\":495}" EX 600
+DELEX lock:cache:product:1001 IFEQ worker-a
+[B] GET cache:product:1001
+
+# Устаревшее, но быстрое значение: храним «мягкий» срок внутри значения, а «жёсткий» TTL — больше
+HSET cache:profile:42 data "{\"name\":\"anya\"}" soft_expire 1762400600
+EXPIRE cache:profile:42 3600
+HGET cache:profile:42 soft_expire
+
+# Кэш с версией: смена версии делает все старые ключи недоступными без массового удаления
+SET cache:version:catalog 7
+INCR cache:version:catalog
+SET cache:catalog:v8:page:1 "...page 1..." EX 600
+
+# Клиентское кэширование (RESP3): сервер сообщает клиенту B, что закэшированный ключ изменился
+SET user:42:name anya
+! [B] HELLO 3
+[B] CLIENT TRACKING ON
+[B] GET user:42:name
+# клиент B сохранил значение у себя в памяти; другой клиент меняет ключ...
+SET user:42:name anna
+# ...и B получает push-сообщение об инвалидации
+[B?]

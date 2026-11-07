@@ -1,0 +1,77 @@
+# ===== MULTI/EXEC: команды выполняются подряд, никто не вклинится =====
+SET balance:anya 100
+SET balance:borya 50
+MULTI
+DECRBY balance:anya 30
+INCRBY balance:borya 30
+EXEC
+MGET balance:anya balance:borya
+
+# Отката нет: ошибка выполнения в одной команде не отменяет остальные
+SET name anya
+MULTI
+INCR name
+SET touched yes
+EXEC
+GET touched
+
+# Синтаксическая ошибка при постановке в очередь отменяет всю транзакцию
+MULTI
+SET a 1
+SET b
+EXEC
+EXISTS a
+
+# ===== WATCH: оптимистичная блокировка =====
+SET stock:mug 5
+WATCH stock:mug
+GET stock:mug
+# ...пока клиент A думает, клиент B покупает последнюю кружку партии
+[B] DECRBY stock:mug 5
+MULTI
+DECRBY stock:mug 1
+EXEC
+GET stock:mug
+# EXEC вернул (nil): транзакция не выполнена, клиент A должен перечитать и повторить
+
+# ===== Lua: логика на сервере, атомарно =====
+@lua take_stock
+-- уменьшить остаток, только если хватает: вернуть новый остаток или -1
+local stock = tonumber(redis.call('GET', KEYS[1]) or '0')
+local want = tonumber(ARGV[1])
+if stock < want then
+  return -1
+end
+return redis.call('DECRBY', KEYS[1], want)
+@end
+SET stock:tee 3
+EVAL $take_stock 1 stock:tee 2
+EVAL $take_stock 1 stock:tee 2
+SCRIPT LOAD $take_stock
+EVALSHA d82c0eef2f3ee5f03b5ed6e9f990d61399447c82 1 stock:tee 1
+EVAL "return redis.call('GET', KEYS[1])" 1 stock:tee
+# Скрипт только на чтение можно выполнять и на репликах
+EVAL_RO "return redis.call('GET', KEYS[1])" 1 stock:tee
+EVAL_RO "return redis.call('SET', KEYS[1], 0)" 1 stock:tee
+
+# ===== Функции (Redis 7.0): именованные, хранятся на сервере, реплицируются =====
+@lua shoplib
+#!lua name=shop
+local function reserve(keys, args)
+  local stock = tonumber(redis.call('GET', keys[1]) or '0')
+  local want = tonumber(args[1])
+  if stock < want then
+    return redis.error_reply('OUT_OF_STOCK осталось ' .. stock)
+  end
+  redis.call('DECRBY', keys[1], want)
+  redis.call('RPUSH', keys[2], args[2])
+  return stock - want
+end
+redis.register_function('reserve', reserve)
+@end
+FUNCTION LOAD $shoplib
+SET stock:cap 2
+FCALL reserve 2 stock:cap reservations:cap 1 order-1
+FCALL reserve 2 stock:cap reservations:cap 5 order-2
+LRANGE reservations:cap 0 -1
+FUNCTION LIST LIBRARYNAME shop

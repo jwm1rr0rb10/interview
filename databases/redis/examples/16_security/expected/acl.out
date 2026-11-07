@@ -1,0 +1,79 @@
+# ===== ACL: пользователи, команды и ключи =====
+redis> ACL WHOAMI
+"default"
+redis> ACL SETUSER app on >app-secret ~app:* +@read +@write -@dangerous
+OK
+redis> ACL SETUSER reporter on >rep-secret ~app:* %R~stats:* +@read
+OK
+redis> ACL SETUSER cache on >cache-secret ~cache:* +get +set +del +expire
+OK
+redis> ACL USERS
+1) "app"
+2) "cache"
+3) "default"
+4) "reporter"
+
+# Клиент B входит как app
+redis[B]> AUTH app app-secret
+OK
+redis[B]> SET app:user:1 anya
+OK
+redis[B]> GET app:user:1
+"anya"
+redis[B]> SET other:key 1
+(error) NOPERM No permissions to access a key
+redis[B]> KEYS *
+(error) NOPERM User app has no permissions to run the 'keys' command
+redis[B]> FLUSHALL
+(error) NOPERM User app has no permissions to run the 'flushall' command
+redis[B]> ACL WHOAMI
+(error) NOPERM User app has no permissions to run the 'acl|whoami' command
+
+# Клиент C — только чтение
+redis[C]> AUTH reporter rep-secret
+OK
+redis[C]> GET app:user:1
+"anya"
+redis[C]> SET app:user:1 hacked
+(error) NOPERM User reporter has no permissions to run the 'set' command
+
+# Клиент D — узкая роль для кэша
+redis[D]> AUTH cache cache-secret
+OK
+redis[D]> SET cache:p:1 x EX 60
+OK
+redis[D]> INCR cache:counter
+(error) NOPERM User cache has no permissions to run the 'incr' command
+redis[D]> AUTH cache wrong-password
+(error) WRONGPASS invalid username-password pair or user is disabled.
+
+# Проверка прав без входа под пользователем
+redis> ACL DRYRUN app SET app:x 1
+OK
+redis> ACL DRYRUN app FLUSHDB
+"User app has no permissions to run the 'flushdb' command"
+redis> ACL GETUSER cache
+ 1) "flags"
+ 2) 1) "on"
+    2) "sanitize-payload"
+ 3) "passwords"
+ 4) 1) "a8c13b5d165fa4895e4fce867fc493bc322e80e328e4d99c86831121adec27ce"
+ 5) "commands"
+ 6) "-@all +get +set +del +expire"
+ 7) "keys"
+ 8) "~cache:*"
+ 9) "channels"
+10) ""
+11) "selectors"
+12) (empty array)
+# Журнал отказов: кто и что пытался сделать
+redis> ACL LOG RESET
+OK
+redis[B]> DEL other:key
+(error) NOPERM No permissions to access a key
+# Запись журнала содержит время и адрес клиента, поэтому в эталоне не печатается:
+# поля reason=key, object=other:key, username=app
+redis> ACL LOG 1
+(ответ опущен: зависит от окружения)
+redis> ACL LOG RESET
+OK

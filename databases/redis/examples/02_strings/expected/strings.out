@@ -1,0 +1,124 @@
+# SET с условиями и временем жизни
+redis> SET lock:report owner-1 NX EX 30
+OK
+redis> SET lock:report owner-2 NX EX 30
+(nil)
+redis> GET lock:report
+"owner-1"
+redis> SET config:mode dark XX
+(nil)
+redis> SET config:mode dark
+OK
+redis> SET config:mode light XX GET
+"dark"
+
+# Сравнение со значением при записи и удалении (Redis 8.4): compare-and-set без Lua
+redis> SET balance 100
+OK
+redis> SET balance 70 IFEQ 100
+OK
+redis> SET balance 50 IFEQ 100
+(nil)
+redis> GET balance
+"70"
+redis> DELEX balance IFEQ 999
+(integer) 0
+redis> DELEX balance IFEQ 70
+(integer) 1
+redis> EXISTS balance
+(integer) 0
+
+# Счётчики: атомарно, без гонок «прочитал — прибавил — записал»
+redis> INCR page:views
+(integer) 1
+redis> INCRBY page:views 10
+(integer) 11
+redis> DECR page:views
+(integer) 10
+redis> INCRBYFLOAT rating 4.5
+"4.5"
+redis> INCRBYFLOAT rating -0.25
+"4.25"
+redis> SET name anya
+OK
+redis> INCR name
+(error) ERR value is not an integer or out of range
+
+# INCREX (Redis 8.8): инкремент с границами и временем жизни одной командой
+redis> INCREX api:calls:user42 BYINT 1 UBOUND 3 EX 60
+1) (integer) 1
+2) (integer) 1
+redis> INCREX api:calls:user42 BYINT 1 UBOUND 3 EX 60
+1) (integer) 2
+2) (integer) 1
+redis> INCREX api:calls:user42 BYINT 1 UBOUND 3 EX 60
+1) (integer) 3
+2) (integer) 1
+redis> INCREX api:calls:user42 BYINT 1 UBOUND 3 EX 60
+1) (integer) 3
+2) (integer) 0
+redis> TTL api:calls:user42
+(integer) 60
+
+# Пачки ключей за один запрос
+redis> MSET price:mug 450 price:tee 1290 price:cap 990
+OK
+redis> MGET price:mug price:cap price:none
+1) "450"
+2) "990"
+3) (nil)
+redis> MSETNX price:mug 1 price:new 2
+(integer) 0
+redis> MGET price:mug price:new
+1) "450"
+2) (nil)
+
+# MSETEX (Redis 8.4): несколько ключей с общим временем жизни
+redis> MSETEX 2 otp:a 111111 otp:b 222222 EX 120
+(integer) 1
+redis> TTL otp:b
+(integer) 120
+
+# GETEX и GETDEL: прочитать и изменить время жизни или удалить
+redis> SET token abc
+OK
+redis> GETEX token EX 60
+"abc"
+redis> TTL token
+(integer) 60
+redis> GETDEL token
+"abc"
+redis> EXISTS token
+(integer) 0
+
+# Строки как байтовые массивы
+redis> SET log "2026-11-06 "
+OK
+redis> APPEND log "ERROR db timeout"
+(integer) 27
+redis> STRLEN log
+(integer) 27
+redis> GETRANGE log 11 15
+"ERROR"
+redis> SETRANGE log 11 "WARN "
+(integer) 27
+redis> GET log
+"2026-11-06 WARN  db timeout"
+
+# LCS — общая подпоследовательность двух строк (Redis 7.0)
+redis> MSET v1 "redis-8.8" v2 "redis-8.10"
+OK
+redis> LCS v1 v2
+"redis-8."
+redis> LCS v1 v2 LEN
+(integer) 8
+
+# Числа в строках хранятся компактно
+redis> SET n 12345
+OK
+redis> OBJECT ENCODING n
+"int"
+redis> SET s "short text"
+OK
+redis> OBJECT ENCODING s
+"embstr"

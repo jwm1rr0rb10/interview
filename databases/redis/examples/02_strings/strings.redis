@@ -1,0 +1,68 @@
+# SET с условиями и временем жизни
+SET lock:report owner-1 NX EX 30
+SET lock:report owner-2 NX EX 30
+GET lock:report
+SET config:mode dark XX
+SET config:mode dark
+SET config:mode light XX GET
+
+# Сравнение со значением при записи и удалении (Redis 8.4): compare-and-set без Lua
+SET balance 100
+SET balance 70 IFEQ 100
+SET balance 50 IFEQ 100
+GET balance
+DELEX balance IFEQ 999
+DELEX balance IFEQ 70
+EXISTS balance
+
+# Счётчики: атомарно, без гонок «прочитал — прибавил — записал»
+INCR page:views
+INCRBY page:views 10
+DECR page:views
+INCRBYFLOAT rating 4.5
+INCRBYFLOAT rating -0.25
+SET name anya
+INCR name
+
+# INCREX (Redis 8.8): инкремент с границами и временем жизни одной командой
+INCREX api:calls:user42 BYINT 1 UBOUND 3 EX 60
+INCREX api:calls:user42 BYINT 1 UBOUND 3 EX 60
+INCREX api:calls:user42 BYINT 1 UBOUND 3 EX 60
+INCREX api:calls:user42 BYINT 1 UBOUND 3 EX 60
+TTL api:calls:user42
+
+# Пачки ключей за один запрос
+MSET price:mug 450 price:tee 1290 price:cap 990
+MGET price:mug price:cap price:none
+MSETNX price:mug 1 price:new 2
+MGET price:mug price:new
+
+# MSETEX (Redis 8.4): несколько ключей с общим временем жизни
+MSETEX 2 otp:a 111111 otp:b 222222 EX 120
+TTL otp:b
+
+# GETEX и GETDEL: прочитать и изменить время жизни или удалить
+SET token abc
+GETEX token EX 60
+TTL token
+GETDEL token
+EXISTS token
+
+# Строки как байтовые массивы
+SET log "2026-11-06 "
+APPEND log "ERROR db timeout"
+STRLEN log
+GETRANGE log 11 15
+SETRANGE log 11 "WARN "
+GET log
+
+# LCS — общая подпоследовательность двух строк (Redis 7.0)
+MSET v1 "redis-8.8" v2 "redis-8.10"
+LCS v1 v2
+LCS v1 v2 LEN
+
+# Числа в строках хранятся компактно
+SET n 12345
+OBJECT ENCODING n
+SET s "short text"
+OBJECT ENCODING s

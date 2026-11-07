@@ -1,0 +1,70 @@
+# ===== Списки: очередь, стек, последние N событий =====
+RPUSH queue job-1 job-2 job-3
+LPOP queue
+LRANGE queue 0 -1
+LPUSH recent:user42 view:1 view:2 view:3 view:4 view:5
+LTRIM recent:user42 0 2
+LRANGE recent:user42 0 -1
+LLEN recent:user42
+LINDEX recent:user42 0
+
+# Надёжная очередь: элемент переносится в список «в работе» атомарно
+RPUSH jobs a b c
+LMOVE jobs jobs:processing LEFT RIGHT
+LRANGE jobs:processing 0 -1
+LREM jobs:processing 1 a
+
+# LMOVEM (Redis 8.10): перенести сразу пачку элементов
+LMOVEM jobs jobs:processing LEFT RIGHT COUNT 5 BULK
+LRANGE jobs:processing 0 -1
+EXISTS jobs
+
+# ===== Хеши: объект с полями =====
+HSET user:42 name anya city kazan visits 0
+HGET user:42 city
+HINCRBY user:42 visits 1
+HMGET user:42 name visits missing
+HGETALL user:42
+HEXISTS user:42 email
+HSETNX user:42 email anya@example.com
+HLEN user:42
+HDEL user:42 city
+HKEYS user:42
+OBJECT ENCODING user:42
+
+# Время жизни отдельных полей (Redis 7.4) и чтение с изменением TTL (Redis 8.0)
+HSET session:s1 user 42 csrf t0k3n
+HEXPIRE session:s1 600 FIELDS 1 csrf
+HTTL session:s1 FIELDS 2 csrf user
+HSETEX session:s1 EX 60 FIELDS 1 otp 123456
+HTTL session:s1 FIELDS 1 otp
+HGETDEL session:s1 FIELDS 1 otp
+HGETALL session:s1
+
+# ===== Множества: уникальные значения и операции над ними =====
+SADD tags:post1 redis db cache
+SADD tags:post2 redis streams queue
+SADD tags:post1 redis
+SISMEMBER tags:post1 cache
+SMISMEMBER tags:post1 cache queue
+SCARD tags:post1
+SINTER tags:post1 tags:post2
+SUNION tags:post1 tags:post2
+SDIFF tags:post1 tags:post2
+SINTERCARD 2 tags:post1 tags:post2
+# Мощности объединения и разности без построения результата (Redis 8.10)
+SUNIONCARD 2 tags:post1 tags:post2
+SDIFFCARD 2 tags:post1 tags:post2
+SMEMBERS tags:post1
+OBJECT ENCODING tags:post1
+
+# Множество целых чисел хранится особенно компактно
+SADD ids 5 1 3
+SMEMBERS ids
+OBJECT ENCODING ids
+
+# ===== Кодировки меняются с ростом =====
+CONFIG GET hash-max-listpack-entries
+HSET big f0 v
+EVAL "for i=1,512 do redis.call('HSET', KEYS[1], 'f'..i, 'v') end return redis.call('HLEN', KEYS[1])" 1 big
+OBJECT ENCODING big

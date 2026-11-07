@@ -1,0 +1,58 @@
+# Поток — журнал событий только на дописывание. Обычно ID задаёт сервер (*);
+# здесь ID явные, чтобы вывод был одинаковым при каждом запуске.
+XADD orders 1762400000000-0 order_id 1001 status created
+XADD orders 1762400000000-1 order_id 1002 status created
+XADD orders 1762400005000-0 order_id 1001 status paid
+XLEN orders
+XRANGE orders - +
+XRANGE orders 1762400000000-1 + COUNT 1
+XREVRANGE orders + - COUNT 1
+
+# ID должны расти
+XADD orders 1762399999999-0 order_id 1 status late
+
+# Чтение «после такого-то ID» — основа подписки
+XREAD COUNT 10 STREAMS orders 1762400000000-1
+
+# Группа потребителей: каждое сообщение получит один из потребителей группы
+XGROUP CREATE orders billing 0
+XREADGROUP GROUP billing worker-1 COUNT 2 STREAMS orders >
+XREADGROUP GROUP billing worker-2 COUNT 2 STREAMS orders >
+
+# Пока сообщение не подтверждено, оно в списке ожидающих (PEL)
+XPENDING orders billing
+XACK orders billing 1762400000000-0
+XPENDING orders billing
+
+# worker-1 упал, не подтвердив сообщение: другой потребитель его забирает
+XAUTOCLAIM orders billing worker-2 0 0-0 COUNT 10
+XPENDING orders billing
+
+# XNACK (Redis 8.8): потребитель освобождает сообщение без подтверждения —
+# оно остаётся в PEL группы без владельца и доступно для повторной доставки
+XNACK orders billing SILENT IDS 1 1762400000000-1
+XPENDING orders billing
+XAUTOCLAIM orders billing worker-1 0 0-0 COUNT 10
+
+# Подтвердить и удалить одной командой (Redis 8.2)
+XACKDEL orders billing IDS 2 1762400000000-1 1762400005000-0
+XLEN orders
+
+# Ограничение размера: ~ — приблизительная обрезка, дешевле точной
+XADD log MAXLEN 2 1-0 msg a
+XADD log MAXLEN 2 2-0 msg b
+XADD log MAXLEN 2 3-0 msg c
+XRANGE log - +
+
+# Идемпотентная запись (Redis 8.6): повтор с тем же ключом не создаёт дубликат.
+# IDMP работает только с ID от сервера (*), поэтому ответ печатаем не напрямую:
+# скрипт сравнивает ID двух попыток (1 — совпали) и возвращает длину потока.
+! XADD payments IDMP gateway-1 pay-777 * amount 500
+! XADD payments IDMP gateway-1 pay-777 * amount 500
+XLEN payments
+EVAL "local a = redis.call('XADD', KEYS[1], 'IDMP', 'gw-2', 'pay-1', '*', 'amount', '10') local b = redis.call('XADD', KEYS[1], 'IDMP', 'gw-2', 'pay-1', '*', 'amount', '10') return {a == b and 1 or 0, redis.call('XLEN', KEYS[1])}" 1 payments
+
+# Блокирующее чтение: клиент B ждёт новых сообщений
+[B&] XREAD BLOCK 5000 STREAMS orders $
+XADD orders 1762400010000-0 order_id 1003 status created
+[B?]

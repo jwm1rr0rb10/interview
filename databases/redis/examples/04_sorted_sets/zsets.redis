@@ -1,0 +1,48 @@
+# Таблица лидеров: член + число (score), упорядочено по score
+ZADD leaderboard 1500 anya 1200 borya 1800 vika 900 gosha
+ZADD leaderboard INCR 400 borya
+ZRANGE leaderboard 0 -1 WITHSCORES
+ZRANGE leaderboard 0 2 REV WITHSCORES
+ZREVRANK leaderboard anya
+ZRANK leaderboard anya WITHSCORE
+ZSCORE leaderboard vika
+ZMSCORE leaderboard anya nobody
+ZCARD leaderboard
+ZCOUNT leaderboard 1000 1700
+
+# Диапазоны по score с пагинацией
+ZRANGE leaderboard 1000 +inf BYSCORE LIMIT 0 2 WITHSCORES
+ZRANGE leaderboard (1600 -inf BYSCORE REV WITHSCORES
+
+# Условные обновления: только если больше (лучший результат игрока)
+ZADD leaderboard GT 1000 vika
+ZADD leaderboard GT CH 2000 vika
+ZSCORE leaderboard vika
+
+# Извлечь минимум или максимум — приоритетная очередь
+ZADD tasks 3 low 1 urgent 2 normal
+ZPOPMIN tasks
+ZPOPMAX tasks
+ZRANGE tasks 0 -1
+
+# Индекс по времени: score = unix-время, удаление старого одной командой
+ZADD events 1762400000 e1 1762400060 e2 1762400120 e3 1762400180 e4
+ZRANGE events 1762400050 1762400150 BYSCORE
+ZREMRANGEBYSCORE events -inf 1762400060
+ZRANGE events 0 -1
+
+# Лексикографические диапазоны при одинаковом score — автодополнение
+ZADD words 0 redis 0 redact 0 red 0 reduce 0 ruby 0 rust
+ZRANGE words [red (ree BYLEX
+ZRANGE words [ru (rv BYLEX
+
+# Объединение и пересечение с весами и агрегатами
+ZADD week:1 10 anya 5 borya
+ZADD week:2 7 anya 9 vika
+ZUNION 2 week:1 week:2 WITHSCORES
+ZUNION 2 week:1 week:2 AGGREGATE MAX WITHSCORES
+ZINTER 2 week:1 week:2 WEIGHTS 1 2 WITHSCORES
+# Агрегат COUNT (Redis 8.8): в скольких множествах встречается член
+ZUNION 2 week:1 week:2 AGGREGATE COUNT WITHSCORES
+
+OBJECT ENCODING leaderboard

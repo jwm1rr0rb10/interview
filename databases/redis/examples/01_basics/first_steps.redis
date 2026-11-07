@@ -1,0 +1,36 @@
+# Проверка связи и первые ключи
+PING
+SET greeting "Hello, Redis"
+GET greeting
+GET missing
+EXISTS greeting missing
+TYPE greeting
+
+# Пространство ключей: двоеточие — соглашение для иерархии имён
+SET user:42:name anya
+SET user:42:city kazan
+DBSIZE
+DEL user:42:city
+DBSIZE
+
+# RENAME атомарно переименовывает, COPY — копирует (Redis 6.2+)
+RENAME greeting hello
+COPY hello hello:backup
+GET hello:backup
+
+# Время жизни ключа
+SET session:abc token-123 EX 300
+TTL session:abc
+TTL hello
+TTL missing
+PERSIST session:abc
+TTL session:abc
+
+# UNLINK удаляет ключ из пространства имён сразу, а память освобождает в фоне
+UNLINK hello hello:backup
+
+# Ошибка типа: команда для строк к списку
+RPUSH tasks t1 t2
+GET tasks
+TYPE tasks
+OBJECT ENCODING tasks

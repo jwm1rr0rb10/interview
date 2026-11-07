@@ -1,0 +1,50 @@
+# ===== Кодировки и память =====
+HSET small f1 v1 f2 v2
+OBJECT ENCODING small
+EVAL "return redis.call('MEMORY', 'USAGE', KEYS[1]) < 200" 1 small
+EVAL "for i=1,1000 do redis.call('HSET', KEYS[1], 'field'..i, 'value'..i) end return redis.call('OBJECT', 'ENCODING', KEYS[1])" 1 large
+# Одни и те же 1000 полей: компактно в listpack или в hashtable
+CONFIG SET hash-max-listpack-entries 2000
+EVAL "for i=1,1000 do redis.call('HSET', KEYS[1], 'field'..i, 'value'..i) end return redis.call('OBJECT', 'ENCODING', KEYS[1])" 1 compact
+EVAL "return {redis.call('MEMORY', 'USAGE', KEYS[1]) > 2 * redis.call('MEMORY', 'USAGE', KEYS[2]) and 1 or 0}" 2 large compact
+CONFIG SET hash-max-listpack-entries 512
+
+# Длинная строка в поле переводит хеш в hashtable сразу
+HSET small description "a value that is definitely longer than sixty four bytes, so the listpack limit is exceeded"
+OBJECT ENCODING small
+
+# ===== Вытеснение: что происходит при достижении maxmemory =====
+SET a 1
+SET b 2
+CONFIG GET maxmemory-policy
+# noeviction (по умолчанию): при нехватке памяти команды записи получают ошибку, чтение работает
+CONFIG SET maxmemory 1
+SET c 3
+GET a
+DBSIZE
+# allkeys-lru: Redis удаляет ключи, пытаясь освободить место
+CONFIG SET maxmemory-policy allkeys-lru
+SET c 3
+DBSIZE
+CONFIG SET maxmemory 0
+CONFIG SET maxmemory-policy noeviction
+
+# volatile-*: вытесняются только ключи с TTL — постоянные данные в безопасности
+SET permanent yes
+SET cache:x 1 EX 600
+CONFIG SET maxmemory-policy volatile-lru
+CONFIG SET maxmemory 1
+SET cache:y 2 EX 600
+EXISTS permanent cache:x
+CONFIG SET maxmemory 0
+CONFIG SET maxmemory-policy noeviction
+
+# Политики вытеснения в Redis 8.6+: добавились LRM — least recently modified
+CONFIG SET maxmemory-policy allkeys-lrm
+CONFIG GET maxmemory-policy
+CONFIG SET maxmemory-policy noeviction
+
+# Безопасное удаление больших ключей — в фоне
+UNLINK large compact
+FLUSHALL ASYNC
+DBSIZE

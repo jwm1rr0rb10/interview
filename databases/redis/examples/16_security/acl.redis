@@ -1,0 +1,38 @@
+# ===== ACL: пользователи, команды и ключи =====
+ACL WHOAMI
+ACL SETUSER app on >app-secret ~app:* +@read +@write -@dangerous
+ACL SETUSER reporter on >rep-secret ~app:* %R~stats:* +@read
+ACL SETUSER cache on >cache-secret ~cache:* +get +set +del +expire
+ACL USERS
+
+# Клиент B входит как app
+[B] AUTH app app-secret
+[B] SET app:user:1 anya
+[B] GET app:user:1
+[B] SET other:key 1
+[B] KEYS *
+[B] FLUSHALL
+[B] ACL WHOAMI
+
+# Клиент C — только чтение
+[C] AUTH reporter rep-secret
+[C] GET app:user:1
+[C] SET app:user:1 hacked
+
+# Клиент D — узкая роль для кэша
+[D] AUTH cache cache-secret
+[D] SET cache:p:1 x EX 60
+[D] INCR cache:counter
+[D] AUTH cache wrong-password
+
+# Проверка прав без входа под пользователем
+ACL DRYRUN app SET app:x 1
+ACL DRYRUN app FLUSHDB
+ACL GETUSER cache
+# Журнал отказов: кто и что пытался сделать
+ACL LOG RESET
+[B] DEL other:key
+# Запись журнала содержит время и адрес клиента, поэтому в эталоне не печатается:
+# поля reason=key, object=other:key, username=app
+! ACL LOG 1
+ACL LOG RESET
